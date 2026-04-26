@@ -54,6 +54,12 @@ public class DolibarrEmployeeDto {
     @JsonProperty("usertype")
     private Integer userType;  // Type d'utilisateur (1 = Internal, 2 = External)
 
+    @JsonProperty("admin")
+    private Integer admin;
+
+    @JsonProperty("superadmin")
+    private Integer superAdmin;
+
     /**
      * Vérifie si l'employé est actif et peut accéder au système
      */
@@ -67,5 +73,9 @@ public class DolibarrEmployeeDto {
     public String getFullName() {
         return (this.firstName != null ? this.firstName : "") + " " + 
                (this.lastName != null ? this.lastName : "");
+    }
+
+    public boolean isAdminLike() {
+        return (admin != null && admin == 1) || (superAdmin != null && superAdmin == 1);
     }
 }

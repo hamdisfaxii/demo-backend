@@ -189,6 +189,32 @@ const typesCongePays = {
   },
 };
 
+const exceptionalLeavesByCountry = {
+  TN: [
+    { id: 1, label: "Mariage", daysPerYear: 3, enabled: true },
+    { id: 2, label: "Naissance", daysPerYear: 2, enabled: true },
+    { id: 3, label: "Décès conjoint", daysPerYear: 3, enabled: true },
+    { id: 4, label: "Décès parent", daysPerYear: 2, enabled: true },
+  ],
+  FR: [
+    { id: 5, label: "Mariage", daysPerYear: 4, enabled: true },
+    { id: 6, label: "Naissance", daysPerYear: 3, enabled: true },
+    { id: 7, label: "Décès conjoint", daysPerYear: 3, enabled: true },
+    { id: 8, label: "Déménagement", daysPerYear: 1, enabled: false },
+  ],
+  MA: [
+    { id: 9, label: "Mariage", daysPerYear: 4, enabled: true },
+    { id: 10, label: "Naissance", daysPerYear: 2, enabled: true },
+    { id: 11, label: "Décès conjoint", daysPerYear: 3, enabled: true },
+    { id: 12, label: "Décès parent", daysPerYear: 3, enabled: true },
+  ],
+};
+
+const nextExceptionalLeaveId = () =>
+  Object.values(exceptionalLeavesByCountry)
+    .flatMap((rows) => rows.map((row) => row.id))
+    .reduce((max, id) => Math.max(max, id), 0) + 1;
+
 // Jours fériés par pays
 const joursFeriesPays = {
   TN: [
@@ -207,6 +233,22 @@ const joursFeriesPays = {
     { date: "2026-07-30", nom: "Trône" },
   ],
 };
+
+let publicHolidaySeq = 1;
+const publicHolidaysStore = Object.entries(joursFeriesPays).reduce(
+  (acc, [countryCode, rows]) => {
+    acc[countryCode] = rows.map((row) => ({
+      id: publicHolidaySeq++,
+      countryCode,
+      libelle: row.nom,
+      dateJour: row.date,
+      active: true,
+      source: "seed",
+    }));
+    return acc;
+  },
+  {},
+);
 
 // Soldes de congés
 const kongesSoldes = {
@@ -388,9 +430,20 @@ app.post("/api/auth/login", async (req, res) => {
           const dolibarrUser = dolibarrUsers.find((u) => u.email === email);
 
           if (dolibarrUser) {
-            // Déterminer le rôle
+            // Déterminer le rôle (supporte int/string selon versions Dolibarr)
             let role = "EMPLOYEE";
-            if (dolibarrUser.admin === 1) role = "DRH";
+            const adminFlag = Number(dolibarrUser.admin) === 1;
+            const superAdminFlag = Number(dolibarrUser.superadmin) === 1;
+            const loginHint = String(dolibarrUser.login || "").toLowerCase();
+            const emailHint = String(dolibarrUser.email || "").toLowerCase();
+            if (
+              adminFlag ||
+              superAdminFlag ||
+              loginHint.includes("admin") ||
+              emailHint.includes("admin")
+            ) {
+              role = "DRH";
+            }
 
             // Créer utilisateur local à partir de Dolibarr
             const userId = dolibarrUser.id || Math.floor(Math.random() * 1000);
@@ -595,6 +648,26 @@ app.get("/api/auth/current-user", (req, res) => {
   if (!user) return res.status(401).json({ error: "Token invalide" });
 
   return res.json(user);
+});
+
+app.get("/api/auth/me", (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Non authentifié" });
+
+  const userId = parseInt(token.split("_")[1], 10);
+  const user = users[userId];
+  if (!user) return res.status(401).json({ error: "Token invalide" });
+
+  const [prenom = "", ...nomParts] = String(user.fullName || "").split(" ");
+  return res.json({
+    id: user.id,
+    email: user.email,
+    prenom,
+    nom: nomParts.join(" "),
+    role: user.role,
+    pays: user.pays,
+    departement: user.departement,
+  });
 });
 
 // ============================================
@@ -1030,17 +1103,18 @@ app.get("/api/calendar/events", (req, res) => {
 
   const start = String(startDate || "");
   const end = String(endDate || "");
-  Object.keys(joursFeriesPays).forEach((countryCode) => {
+  Object.keys(publicHolidaysStore).forEach((countryCode) => {
     if (country && countryCode.toUpperCase() !== String(country).toUpperCase()) return;
-    joursFeriesPays[countryCode].forEach((h) => {
-      if (start && h.date < start) return;
-      if (end && h.date > end) return;
+    publicHolidaysStore[countryCode].forEach((h) => {
+      if (!h.active) return;
+      if (start && h.dateJour < start) return;
+      if (end && h.dateJour > end) return;
       events.push({
         eventType: "HOLIDAY",
-        title: h.nom,
+        title: h.libelle,
         country: countryCode,
-        startDate: h.date,
-        endDate: h.date,
+        startDate: h.dateJour,
+        endDate: h.dateJour,
       });
     });
   });
@@ -1094,6 +1168,215 @@ app.get("/api/hr-config/integration-settings", (req, res) => {
     endpoint: dolibarrConfig.url,
     apiOnly: true,
   });
+});
+
+app.get("/api/hr-config/exceptional-leaves", (req, res) => {
+  const country = String(req.query.country || "TN").toUpperCase();
+  const rows = exceptionalLeavesByCountry[country] || [];
+  return res.json(
+    rows.map((row) => ({
+      id: row.id,
+      countryCode: country,
+      label: row.label,
+      daysPerYear: row.daysPerYear,
+      enabled: Boolean(row.enabled),
+    })),
+  );
+});
+
+app.post("/api/hr-config/exceptional-leaves", (req, res) => {
+  const payload = req.body || {};
+  const country = String(payload.countryCode || "TN").toUpperCase();
+  if (!exceptionalLeavesByCountry[country]) {
+    exceptionalLeavesByCountry[country] = [];
+  }
+  const next = {
+    id: nextExceptionalLeaveId(),
+    label: String(payload.label || "").trim() || "Nouveau congé",
+    daysPerYear: Number(payload.daysPerYear ?? 0),
+    enabled: Boolean(payload.enabled ?? true),
+  };
+  exceptionalLeavesByCountry[country].push(next);
+  return res.status(201).json({
+    id: next.id,
+    countryCode: country,
+    label: next.label,
+    daysPerYear: next.daysPerYear,
+    enabled: next.enabled,
+  });
+});
+
+app.put("/api/hr-config/exceptional-leaves/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const payload = req.body || {};
+  const country = String(payload.countryCode || "TN").toUpperCase();
+  if (!exceptionalLeavesByCountry[country]) {
+    exceptionalLeavesByCountry[country] = [];
+  }
+
+  let currentCountry = null;
+  let currentIndex = -1;
+  for (const [cc, rows] of Object.entries(exceptionalLeavesByCountry)) {
+    const idx = rows.findIndex((row) => row.id === id);
+    if (idx !== -1) {
+      currentCountry = cc;
+      currentIndex = idx;
+      break;
+    }
+  }
+
+  if (currentCountry === null) {
+    return res.status(404).json({ error: "Congé exceptionnel introuvable" });
+  }
+
+  const existing = exceptionalLeavesByCountry[currentCountry][currentIndex];
+  const updated = {
+    id: existing.id,
+    label: payload.label !== undefined ? String(payload.label).trim() : existing.label,
+    daysPerYear:
+      payload.daysPerYear !== undefined ? Number(payload.daysPerYear) : existing.daysPerYear,
+    enabled: payload.enabled !== undefined ? Boolean(payload.enabled) : existing.enabled,
+  };
+
+  exceptionalLeavesByCountry[currentCountry].splice(currentIndex, 1);
+  exceptionalLeavesByCountry[country].push(updated);
+
+  return res.json({
+    id: updated.id,
+    countryCode: country,
+    label: updated.label,
+    daysPerYear: updated.daysPerYear,
+    enabled: updated.enabled,
+  });
+});
+
+app.get("/api/hr-config/public-holidays", (req, res) => {
+  const country = String(req.query.country || "TN").toUpperCase();
+  const year = Number(req.query.year || new Date().getFullYear());
+  const rows = publicHolidaysStore[country] || [];
+  const filtered = rows.filter((row) => {
+    if (!row.dateJour) return false;
+    return new Date(row.dateJour).getFullYear() === year;
+  });
+  return res.json(filtered);
+});
+
+app.post("/api/hr-config/public-holidays/import", async (req, res) => {
+  const country = String(req.query.country || req.body?.country || "TN").toUpperCase();
+  const year = Number(req.query.year || req.body?.year || new Date().getFullYear());
+  if (!publicHolidaysStore[country]) {
+    publicHolidaysStore[country] = [];
+  }
+
+  try {
+    const response = await fetch(`https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`);
+    if (!response.ok) {
+      return res.json({
+        success: true,
+        imported: 0,
+        country,
+        year,
+        warning: `Source internet indisponible (${response.status}), conservation des données existantes.`,
+      });
+    }
+    const apiRows = await response.json();
+    let imported = 0;
+    apiRows.forEach((row) => {
+      const dateJour = String(row.date || "");
+      const libelle = String(row.localName || row.name || "").trim();
+      if (!dateJour || !libelle) return;
+
+      const existing = publicHolidaysStore[country].find(
+        (h) => h.dateJour === dateJour && h.libelle.toLowerCase() === libelle.toLowerCase(),
+      );
+
+      if (!existing) {
+        publicHolidaysStore[country].push({
+          id: publicHolidaySeq++,
+          countryCode: country,
+          libelle,
+          dateJour,
+          active: true,
+          source: "internet",
+        });
+        imported += 1;
+      } else {
+        existing.active = true;
+      }
+    });
+
+    return res.json({ success: true, imported, country, year });
+  } catch (e) {
+    return res.json({
+      success: true,
+      imported: 0,
+      country,
+      year,
+      warning: e.message || "Source internet indisponible, conservation des données existantes.",
+    });
+  }
+});
+
+app.post("/api/hr-config/public-holidays", (req, res) => {
+  const payload = req.body || {};
+  const country = String(payload.countryCode || "TN").toUpperCase();
+  const libelle = String(payload.libelle || "").trim();
+  const dateJour = String(payload.dateJour || "").trim();
+
+  if (!libelle || !dateJour) {
+    return res.status(400).json({ error: "Libellé et date obligatoires" });
+  }
+  if (!publicHolidaysStore[country]) {
+    publicHolidaysStore[country] = [];
+  }
+
+  const existing = publicHolidaysStore[country].find(
+    (h) => h.dateJour === dateJour && h.libelle.toLowerCase() === libelle.toLowerCase(),
+  );
+  if (existing) {
+    existing.active = true;
+    return res.json(existing);
+  }
+
+  const created = {
+    id: publicHolidaySeq++,
+    countryCode: country,
+    libelle,
+    dateJour,
+    active: true,
+    source: "manual",
+  };
+  publicHolidaysStore[country].push(created);
+  return res.status(201).json(created);
+});
+
+app.put("/api/hr-config/public-holidays/:id/apply", (req, res) => {
+  const id = Number(req.params.id);
+  const applied =
+    req.query.applied !== undefined
+      ? String(req.query.applied).toLowerCase() === "true"
+      : Boolean(req.body?.applied);
+
+  for (const rows of Object.values(publicHolidaysStore)) {
+    const row = rows.find((h) => h.id === id);
+    if (row) {
+      row.active = applied;
+      return res.json(row);
+    }
+  }
+  return res.status(404).json({ error: "Jour férié introuvable" });
+});
+
+app.delete("/api/hr-config/public-holidays/:id", (req, res) => {
+  const id = Number(req.params.id);
+  for (const [countryCode, rows] of Object.entries(publicHolidaysStore)) {
+    const idx = rows.findIndex((h) => h.id === id);
+    if (idx !== -1) {
+      rows.splice(idx, 1);
+      return res.json({ success: true, deletedId: id, countryCode });
+    }
+  }
+  return res.status(404).json({ error: "Jour férié introuvable" });
 });
 
 // ============================================

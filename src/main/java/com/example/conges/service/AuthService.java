@@ -41,7 +41,7 @@ public class AuthService {
         UserEntity user = userRepository.findByDolibarrId(dolibarrUser.getId())
                 .orElseGet(() -> userRepository.findByEmail(email).orElse(null));
 
-        Role role = user != null ? user.getRole() : Role.EMPLOYE;
+        Role role = resolveRole(user, dolibarrUser, email);
         String nom = dolibarrUser.getLastName();
         String prenom = dolibarrUser.getFirstName();
 
@@ -81,5 +81,24 @@ public class AuthService {
                         .pays(user.getPays())
                         .build())
                 .build();
+    }
+
+    private Role resolveRole(UserEntity existingUser, DolibarrEmployeeDto dolibarrUser, String email) {
+        if (existingUser != null && existingUser.getRole() != null && existingUser.getRole() != Role.EMPLOYE) {
+            // Si un rôle RH/ADMIN local a déjà été validé, on le conserve.
+            return existingUser.getRole();
+        }
+
+        if (dolibarrUser != null && dolibarrUser.isAdminLike()) {
+            return Role.ADMIN;
+        }
+
+        String login = dolibarrUser == null ? "" : String.valueOf(dolibarrUser.getLogin()).toLowerCase();
+        String normalizedEmail = email == null ? "" : email.toLowerCase();
+        if (login.contains("admin") || normalizedEmail.contains("admin")) {
+            return Role.ADMIN;
+        }
+
+        return Role.EMPLOYE;
     }
 }

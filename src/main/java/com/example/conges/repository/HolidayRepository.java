@@ -14,6 +14,24 @@ public interface HolidayRepository extends JpaRepository<Holiday, Long> {
 
     Optional<Holiday> findByDolibarrHolidayId(Long dolibarrHolidayId);
 
+    Optional<Holiday> findByCountryCodeAndDateJourAndLibelleIgnoreCase(
+            String countryCode,
+            LocalDate dateJour,
+            String libelle
+    );
+
+    @Query("""
+            SELECT h
+            FROM Holiday h
+            WHERE (:countryCode IS NULL OR h.countryCode = :countryCode)
+              AND (:year IS NULL OR YEAR(h.dateJour) = :year)
+            ORDER BY h.dateJour ASC, h.libelle ASC
+            """)
+    List<Holiday> findForHrPanel(
+            @Param("countryCode") String countryCode,
+            @Param("year") Integer year
+    );
+
     List<Holiday> findByActiveTrue();
 
     @Query("SELECT h FROM Holiday h WHERE h.active = true AND h.dateJour BETWEEN :debut AND :fin ORDER BY h.dateJour ASC")

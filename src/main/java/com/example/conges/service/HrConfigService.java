@@ -2,7 +2,9 @@ package com.example.conges.service;
 
 import com.example.conges.dto.config.LeaveTypeConfigRequest;
 import com.example.conges.entity.CountryLeavePolicy;
+import com.example.conges.entity.ExceptionalLeaveConfig;
 import com.example.conges.entity.LeaveType;
+import com.example.conges.repository.ExceptionalLeaveConfigRepository;
 import com.example.conges.repository.LeaveTypeRepository;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +19,7 @@ public class HrConfigService {
 
     private final CountryPolicyService countryPolicyService;
     private final LeaveTypeRepository leaveTypeRepository;
+    private final ExceptionalLeaveConfigRepository exceptionalLeaveConfigRepository;
     private final DolibarrService dolibarrService;
 
     @Transactional(readOnly = true)
@@ -57,5 +60,44 @@ public class HrConfigService {
     @Transactional(readOnly = true)
     public Map<String, String> getIntegrationSettings() {
         return Map.of("dolibarrStatus", dolibarrService.getDolibarrStatus());
+    }
+
+    @Transactional(readOnly = true)
+    public List<ExceptionalLeaveConfig> getExceptionalLeavesByCountry(String countryCode) {
+        String normalized = countryCode == null ? "TN" : countryCode.trim().toUpperCase();
+        return exceptionalLeaveConfigRepository.findByCountryCodeOrderByLabelAsc(normalized);
+    }
+
+    @Transactional
+    public ExceptionalLeaveConfig createExceptionalLeave(ExceptionalLeaveConfig payload) {
+        payload.setId(null);
+        payload.setCountryCode(payload.getCountryCode() == null ? "TN" : payload.getCountryCode().trim().toUpperCase());
+        payload.setLabel(payload.getLabel() == null ? "" : payload.getLabel().trim());
+        if (payload.getEnabled() == null) {
+            payload.setEnabled(Boolean.TRUE);
+        }
+        if (payload.getDaysPerYear() == null) {
+            payload.setDaysPerYear(0);
+        }
+        return exceptionalLeaveConfigRepository.save(payload);
+    }
+
+    @Transactional
+    public ExceptionalLeaveConfig updateExceptionalLeave(Long id, ExceptionalLeaveConfig payload) {
+        ExceptionalLeaveConfig existing = exceptionalLeaveConfigRepository.findById(id)
+                .orElseThrow(() -> new EntityNotFoundException("Congé exceptionnel introuvable"));
+        if (payload.getCountryCode() != null) {
+            existing.setCountryCode(payload.getCountryCode().trim().toUpperCase());
+        }
+        if (payload.getLabel() != null) {
+            existing.setLabel(payload.getLabel().trim());
+        }
+        if (payload.getDaysPerYear() != null) {
+            existing.setDaysPerYear(payload.getDaysPerYear());
+        }
+        if (payload.getEnabled() != null) {
+            existing.setEnabled(payload.getEnabled());
+        }
+        return exceptionalLeaveConfigRepository.save(existing);
     }
 }

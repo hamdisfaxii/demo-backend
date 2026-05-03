@@ -24,6 +24,9 @@ public class EmailTestController {
     @Value("${spring.mail.username}")
     private String mailUsername;
 
+    @Value("${app.notification.from.email}")
+    private String fromEmail;
+
     @Value("${app.notification.from.name}")
     private String fromName;
 
@@ -74,7 +77,7 @@ public class EmailTestController {
 
         try {
             SimpleMailMessage message = new SimpleMailMessage();
-            message.setFrom(mailUsername);
+            message.setFrom(fromEmail);
             message.setTo(request.getTo());
             message.setSubject(request.getSubject() != null ? request.getSubject() : "Test Email - Gestion des Congés");
             message.setText(request.getMessage() != null ? request.getMessage() : "Ceci est un email de test du système Gestion des Congés");
@@ -108,7 +111,7 @@ public class EmailTestController {
         try {
             // Try to send a minimal test
             SimpleMailMessage testMessage = new SimpleMailMessage();
-            testMessage.setFrom(mailUsername);
+            testMessage.setFrom(fromEmail);
             testMessage.setTo(mailUsername); // Send to self
             testMessage.setSubject("[SYSTEM TEST] SMTP Verification");
             testMessage.setText("SMTP Configuration Test - " + System.currentTimeMillis());

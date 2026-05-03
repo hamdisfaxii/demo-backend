@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node mock-backend.js",
     "dev": "nodemon mock-backend.js",
+    "spring:dev": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-backend-dev.ps1",
     "test:email": "node test-email-config.js",
     "test:smtp": "node test-email-config.js"
   },

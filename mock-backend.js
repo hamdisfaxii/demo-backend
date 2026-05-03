@@ -46,6 +46,22 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
+const DOLIBARR_DB_TABLE_PREFIX = String(process.env.DOLIBARR_DB_TABLE_PREFIX ?? "llx_")
+  .trim()
+  .replace(/`/g, "");
+
+/** Noms qualifiés de tables Dolibarr (llx_user / llx_c_country / … selon DOLIBARR_DB_TABLE_PREFIX). */
+function dolibarrQualifiedTable(part) {
+  const base = String(part || "")
+    .replace(/^[`'"]|[`'"]$/g, "")
+    .replace(/^llx_/i, "")
+    .replace(/[^a-zA-Z0-9_]/g, "");
+  let pfx = String(DOLIBARR_DB_TABLE_PREFIX ?? "llx_").replace(/[^a-zA-Z0-9_]/g, "");
+  if (!pfx) pfx = "llx";
+  const p = pfx.endsWith("_") ? pfx : `${pfx}_`;
+  return `${p}${base}`;
+}
+
 // Créer un pool de connexions
 const pool = mysql.createPool(DB_CONFIG);
 
@@ -53,11 +69,11 @@ const pool = mysql.createPool(DB_CONFIG);
 async function getHolidaysFromDolibarr(userId) {
   try {
     const conn = await pool.getConnection();
+    const holidayUsers = dolibarrQualifiedTable("holiday_users");
 
-    // Essayer de récupérer les soldes depuis llx_holiday_users
     // NOTE: Les colonnes pourront être: rowid, fk_user, type_holiday_id, nb_total, nb_used, nb_available, etc.
     const [rows] = await conn.execute(
-      `SELECT * FROM llx_holiday_users WHERE fk_user = ? LIMIT 5`,
+      `SELECT * FROM \`${holidayUsers}\` WHERE fk_user = ? LIMIT 20`,
       [userId],
     );
     conn.release();
@@ -73,7 +89,7 @@ async function getHolidaysFromDolibarr(userId) {
     return rows;
   } catch (error) {
     console.error(
-      `❌ Error querying llx_holiday_users for user ${userId}:`,
+      `❌ Error querying Dolibarr holiday_users for user ${userId}:`,
       error.message,
     );
     return [];
@@ -84,10 +100,10 @@ async function getHolidaysFromDolibarr(userId) {
 async function mapDolibarrHolidayTypes() {
   try {
     const conn = await pool.getConnection();
+    const tbl = dolibarrQualifiedTable("c_holiday_types");
 
-    // Récupérer tous les types de congés depuis Dolibarr
     const [types] = await conn.execute(
-      `SELECT rowid, code, label FROM llx_c_holiday_types WHERE active = 1`,
+      `SELECT rowid, code, label FROM \`${tbl}\` WHERE active = 1`,
     );
     conn.release();
 
@@ -102,7 +118,7 @@ async function mapDolibarrHolidayTypes() {
 
     return mapping;
   } catch (error) {
-    console.error(`❌ Error querying llx_c_holiday_types:`, error.message);
+    console.error(`❌ Error querying Dolibarr c_holiday_types:`, error.message);
     return {};
   }
 }
@@ -184,10 +200,199 @@ const typesCongePays = {
   },
   MA: {
     CONGES_PAYES: { nom: "Congés Payés", jours: 22, code: "CP" },
+    RTT: { nom: "Permission / courte durée", jours: 10, code: "RTT" },
     MALADIE: { nom: "Congé Maladie", jours: 0, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 120, code: "PAR" },
   },
 };
+
+/** Pays métier gérés par le mock (quotas TN | FR | MA). */
+const MOCK_HR_PAYES_ISO2 = new Set(["TN", "FR", "MA"]);
+
+const ISO3166_ALPHA3_TO2 = Object.freeze({
+  FRA: "FR",
+  TUN: "TN",
+  MAR: "MA",
+});
+
+const NUMERIC_COUNTRY_CODE_TO_ISO2 = Object.freeze({
+  250: "FR",
+  788: "TN",
+  504: "MA",
+});
+
+const FR_OVERSEAS_ISO2_TO_FR = new Set([
+  "GP",
+  "MQ",
+  "GF",
+  "RE",
+  "YT",
+  "PM",
+  "BL",
+  "MF",
+  "WF",
+  "PF",
+  "NC",
+  "TF",
+]);
+
+function mapFrenchOverseasToFr(iso2) {
+  if (!iso2) return null;
+  const u = String(iso2).trim().toUpperCase();
+  if (FR_OVERSEAS_ISO2_TO_FR.has(u)) return "FR";
+  return u;
+}
+
+function iso2FromAlpha3OrMixed(codeRaw) {
+  if (codeRaw == null || codeRaw === "") return null;
+  const s = String(codeRaw).trim().toUpperCase().replace(/\s+/g, "");
+  if (/^\d{1,3}$/.test(s)) {
+    const n = Number(s);
+    return NUMERIC_COUNTRY_CODE_TO_ISO2[n]
+      ? mapFrenchOverseasToFr(NUMERIC_COUNTRY_CODE_TO_ISO2[n])
+      : null;
+  }
+  if (s.length === 2 && /^[A-Z]{2}$/.test(s))
+    return mapFrenchOverseasToFr(s) || s;
+  if (s.length === 3 && ISO3166_ALPHA3_TO2[s])
+    return mapFrenchOverseasToFr(ISO3166_ALPHA3_TO2[s]);
+  return null;
+}
+
+function iso2FromCountryLabels(...labels) {
+  const hints = [
+    [/tunisi/i, "TN"],
+    [/franc/i, "FR"],
+    [/maroc/i, "MA"],
+  ];
+  for (const lab of labels) {
+    if (!lab) continue;
+    const t = String(lab).toLowerCase();
+    for (const [re, iso] of hints) {
+      if (re.test(t)) return iso;
+    }
+  }
+  return null;
+}
+
+function normalizePaysForQuota(isoRaw) {
+  if (isoRaw == null || isoRaw === "") return "TN";
+  const fromCode = iso2FromAlpha3OrMixed(isoRaw);
+  const fromLabel = iso2FromCountryLabels(isoRaw);
+  const guessed = fromCode || fromLabel || String(isoRaw).trim().toUpperCase();
+  const mapped = mapFrenchOverseasToFr(guessed) || guessed;
+  if (MOCK_HR_PAYES_ISO2.has(mapped)) return mapped;
+  return "TN";
+}
+
+/** Aplatissement JSON Dolibarr (country imbriqué → fk_country / libellés / codes). */
+function flattenDolibarrCountryPayload(u) {
+  if (!u || typeof u !== "object") return;
+  const c = u.country;
+  if (c && typeof c === "object") {
+    const nid = c.rowid ?? c.id;
+    if (nid != null) {
+      const n = Number(nid);
+      if (Number.isFinite(n)) {
+        if (u.fk_country == null) u.fk_country = n;
+        if (u.country_id == null) u.country_id = n;
+      }
+    }
+    const lab =
+      typeof c.label === "string"
+        ? c.label
+        : typeof c.name === "string"
+          ? c.name
+          : null;
+    if (typeof lab === "string" && lab.trim())
+      u.country_label = lab.trim();
+    const code = c.code ?? c.code_iso;
+    if (code != null && String(code).trim()) {
+      const cs = String(code).trim().toUpperCase();
+      if (!u.country_code) u.country_code = cs;
+      if (!u.country_code_iso) u.country_code_iso = cs;
+    }
+  }
+  if (u.country_id != null && u.fk_country == null) {
+    const n = Number(u.country_id);
+    u.fk_country = Number.isFinite(n) ? n : u.country_id;
+  }
+  if (
+    u.country_code != null &&
+    u.country_code_iso == null &&
+    String(u.country_code).trim()
+  ) {
+    u.country_code_iso = String(u.country_code).trim().toUpperCase();
+  }
+}
+
+function isoCountryFromDolibarrPayload(u) {
+  if (!u || typeof u !== "object") return null;
+  flattenDolibarrCountryPayload(u);
+  let iso =
+    iso2FromAlpha3OrMixed(u.country_code_iso) ||
+    iso2FromAlpha3OrMixed(u.country_code);
+  if (!iso) iso = iso2FromCountryLabels(u.country_label);
+  return iso ? mapFrenchOverseasToFr(iso) : null;
+}
+
+async function resolveCountryIsoFromDolibarrSql(dolibarrUserRowid) {
+  if (!pool || dolibarrUserRowid == null) return null;
+  const uid = Number(dolibarrUserRowid);
+  if (!Number.isFinite(uid)) return null;
+  const uTbl = dolibarrQualifiedTable("user");
+  const cTbl = dolibarrQualifiedTable("c_country");
+  if (!uTbl || !cTbl) return null;
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const q = `
+      SELECT u.fk_country AS fk_country_u,
+             c.rowid AS c_rowid,
+             c.code AS c_code,
+             c.code_iso AS c_code_iso,
+             c.label AS c_label
+      FROM \`${uTbl}\` u
+      LEFT JOIN \`${cTbl}\` c ON c.rowid = u.fk_country
+      WHERE u.rowid = ?
+      LIMIT 1`;
+    const [rows] = await conn.execute(q, [uid]);
+    if (!rows || !rows.length) return null;
+    const row = rows[0];
+    const raw = row.c_code_iso ?? row.c_code ?? "";
+    let iso =
+      iso2FromAlpha3OrMixed(raw) || iso2FromCountryLabels(row.c_label);
+    return iso ? mapFrenchOverseasToFr(iso) : null;
+  } catch (e) {
+    console.warn("resolveCountryIsoFromDolibarrSql:", e.message);
+    return null;
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
+/** Aligne les libellés API (CONGE_MALADIE, etc.) sur la clé du registre de soldes mock. */
+function normalizeCongeLedgerKey(typeCongeRaw) {
+  const u = String(typeCongeRaw || "").toUpperCase();
+  if (u.includes("MALADIE")) return "MALADIE";
+  if (
+    u === "RTT" ||
+    u.includes("RTT") ||
+    u.includes("COURTE") ||
+    u.includes("PERMISSION") ||
+    u.includes("SORTIE")
+  )
+    return "RTT";
+  if (u.includes("PARENTAL")) return "PARENTAL";
+  if (u.includes("ENFANT") || u.endsWith("_ENF") || u.includes("ENFANT_MALADE"))
+    return "ENFANT_MALADE";
+  if (u.includes("SANS_SOLDE")) return "CONGE_SANS_SOLDE";
+  return "CONGES_PAYES";
+}
+
+function absenceSansDecoteAuSolde(ledgerKey) {
+  return ledgerKey === "MALADIE" || ledgerKey === "CONGE_SANS_SOLDE";
+}
 
 const exceptionalLeavesByCountry = {
   TN: [
@@ -234,6 +439,118 @@ const joursFeriesPays = {
   ],
 };
 
+const scheduleTypeDefaults = {
+  NORMAL: { firstStart: "08:00", firstEnd: "12:00", secondStart: "13:00", secondEnd: "17:00" },
+  SUMMER: { firstStart: "08:00", firstEnd: "14:00", secondStart: null, secondEnd: null },
+  RAMADAN: { firstStart: "09:00", firstEnd: "15:00", secondStart: null, secondEnd: null },
+};
+
+const buildDefaultScheduleRows = (type) =>
+  Array.from({ length: 7 }).map((_, dayOfWeek) => {
+    if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+      return { dayOfWeek, ...scheduleTypeDefaults[type] };
+    }
+    return {
+      dayOfWeek,
+      firstStart: null,
+      firstEnd: null,
+      secondStart: null,
+      secondEnd: null,
+    };
+  });
+
+const workSchedulesByCountry = {
+  TN: {
+    settings: {
+      activeType: "NORMAL",
+      normalEnabled: true,
+      summerEnabled: true,
+      ramadanEnabled: true,
+    },
+    types: {
+      NORMAL: buildDefaultScheduleRows("NORMAL"),
+      SUMMER: buildDefaultScheduleRows("SUMMER"),
+      RAMADAN: buildDefaultScheduleRows("RAMADAN"),
+    },
+  },
+  FR: {
+    settings: {
+      activeType: "NORMAL",
+      normalEnabled: true,
+      summerEnabled: true,
+      ramadanEnabled: true,
+    },
+    types: {
+      NORMAL: buildDefaultScheduleRows("NORMAL"),
+      SUMMER: buildDefaultScheduleRows("SUMMER"),
+      RAMADAN: buildDefaultScheduleRows("RAMADAN"),
+    },
+  },
+  MA: {
+    settings: {
+      activeType: "NORMAL",
+      normalEnabled: true,
+      summerEnabled: true,
+      ramadanEnabled: true,
+    },
+    types: {
+      NORMAL: buildDefaultScheduleRows("NORMAL"),
+      SUMMER: buildDefaultScheduleRows("SUMMER"),
+      RAMADAN: buildDefaultScheduleRows("RAMADAN"),
+    },
+  },
+};
+
+const ensureWorkSchedule = (country) => {
+  const cc = String(country || "TN").toUpperCase();
+  if (!workSchedulesByCountry[cc]) {
+    workSchedulesByCountry[cc] = {
+      settings: {
+        activeType: "NORMAL",
+        normalEnabled: true,
+        summerEnabled: true,
+        ramadanEnabled: true,
+      },
+      types: {
+        NORMAL: buildDefaultScheduleRows("NORMAL"),
+        SUMMER: buildDefaultScheduleRows("SUMMER"),
+        RAMADAN: buildDefaultScheduleRows("RAMADAN"),
+      },
+    };
+  }
+  return workSchedulesByCountry[cc];
+};
+
+const toMinutes = (time) => {
+  if (!time || !String(time).includes(":")) return null;
+  const [h, m] = String(time).split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+};
+
+const isWithinSchedule = (country, dateValue, start, end) => {
+  const schedule = ensureWorkSchedule(country);
+  const activeType = schedule.settings.activeType || "NORMAL";
+  const rows = schedule.types[activeType] || [];
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return false;
+  const jsDay = date.getDay(); // 0 dimanche .. 6 samedi
+  const row = rows.find((r) => Number(r.dayOfWeek) === jsDay);
+  if (!row) return false;
+
+  const startMin = toMinutes(start);
+  const endMin = toMinutes(end);
+  if (startMin === null || endMin === null || endMin <= startMin) return false;
+
+  const s1 = toMinutes(row.firstStart);
+  const e1 = toMinutes(row.firstEnd);
+  const s2 = toMinutes(row.secondStart);
+  const e2 = toMinutes(row.secondEnd);
+  const inFirst = s1 !== null && e1 !== null && startMin >= s1 && endMin <= e1;
+  const inSecond = s2 !== null && e2 !== null && startMin >= s2 && endMin <= e2;
+  return inFirst || inSecond;
+};
+
 let publicHolidaySeq = 1;
 const publicHolidaysStore = Object.entries(joursFeriesPays).reduce(
   (acc, [countryCode, rows]) => {
@@ -261,6 +578,28 @@ const kongesSoldes = {
     RTT: { solde_initial: 12, utilise: 0, restant: 12 },
   },
 };
+
+/**
+ * Au login Dolibarr : recharge fk_country via MySQL si possible, puis normalise TN|FR|MA.
+ * Réinitialise kongesSoldes si le pays change.
+ */
+async function syncUserPaysFromDolibarrDatabase(user, dolibarrJson) {
+  if (!user || user.id == null) return;
+  const prev = normalizePaysForQuota(user.pays || "TN");
+  let iso2 = null;
+  if (user.dolibarr_id != null) {
+    iso2 = await resolveCountryIsoFromDolibarrSql(user.dolibarr_id);
+  }
+  if (!iso2 && dolibarrJson && typeof dolibarrJson === "object") {
+    iso2 = isoCountryFromDolibarrPayload({ ...dolibarrJson });
+  }
+  const next = normalizePaysForQuota(iso2 || user.pays || "TN");
+  if (prev !== next && kongesSoldes[user.id]) {
+    delete kongesSoldes[user.id];
+  }
+  user.pays = next;
+  if (users[user.id]) users[user.id].pays = next;
+}
 
 // Passwords valides (mis à jour au login depuis Dolibarr)
 let validPasswords = {
@@ -401,6 +740,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     // Faire un fallback: d'abord essayer Dolibarr, sinon utiliser les users locaux
     let user = null;
+    let dolibarrLoginPayload = null;
 
     try {
       // 1. Récupérer TOUS les utilisateurs depuis Dolibarr API endpoint /users
@@ -427,9 +767,16 @@ app.post("/api/auth/login", async (req, res) => {
         // Dolibarr retourne un array de tous les users
         if (dolibarrUsers && Array.isArray(dolibarrUsers)) {
           // Filtrer par email en JavaScript (SÉCURISÉ - pas d'injection SQL)
-          const dolibarrUser = dolibarrUsers.find((u) => u.email === email);
+          const dolibarrUser = dolibarrUsers.find(
+            (u) =>
+              u &&
+              email &&
+              String(u.email || "").toLowerCase() === String(email).toLowerCase(),
+          );
 
           if (dolibarrUser) {
+            dolibarrLoginPayload = dolibarrUser;
+            flattenDolibarrCountryPayload(dolibarrUser);
             // Déterminer le rôle (supporte int/string selon versions Dolibarr)
             let role = "EMPLOYEE";
             const adminFlag = Number(dolibarrUser.admin) === 1;
@@ -445,8 +792,13 @@ app.post("/api/auth/login", async (req, res) => {
               role = "DRH";
             }
 
-            // Créer utilisateur local à partir de Dolibarr
-            const userId = dolibarrUser.id || Math.floor(Math.random() * 1000);
+            const rowid = Number(dolibarrUser.rowid ?? dolibarrUser.id);
+            const userId =
+              Number.isFinite(rowid) ? rowid : Math.floor(Math.random() * 1000);
+            const paysGuess = normalizePaysForQuota(
+              isoCountryFromDolibarrPayload(dolibarrUser) || "TN",
+            );
+
             user = {
               id: userId,
               email: dolibarrUser.email,
@@ -455,9 +807,11 @@ app.post("/api/auth/login", async (req, res) => {
                 " " +
                 (dolibarrUser.lastname || ""),
               role: role,
-              pays: "TN",
+              pays: paysGuess,
               departement: dolibarrUser.department || "General",
-              dolibarr_id: dolibarrUser.id,
+              dolibarr_id: Number.isFinite(rowid)
+                ? rowid
+                : Number(dolibarrUser.id ?? userId),
             };
             users[userId] = user;
             console.log("✅ User found in Dolibarr:", user.fullName);
@@ -513,6 +867,8 @@ app.post("/api/auth/login", async (req, res) => {
     if (!user.dolibarr_id) {
       validPasswords[email] = password;
     }
+
+    await syncUserPaysFromDolibarrDatabase(user, dolibarrLoginPayload);
 
     // 6. INITIALISER LES SOLDES DE CONGÉ AU LOGIN - DEPUIS DOLIBARR
     // Récupérer les vraies valeurs depuis la base Dolibarr
@@ -690,15 +1046,43 @@ const buildSoldeResponse = (userId) => {
     pays: user.pays,
   }));
 
-  const totalRestant = details.reduce(
-    (total, item) => total + (item.solde_restant || 0),
+  const byType = (key) =>
+    details.find((d) => d.type === key) || null;
+  const cp = byType("CONGES_PAYES");
+  const rtt = byType("RTT");
+  const mal = byType("MALADIE");
+
+  const soldeCongesPayes = Math.max(
+    0,
+    cp ? Number(cp.solde_restant || 0) : 0,
+  );
+  const soldeCourteDuree = rtt ? Math.max(0, Number(rtt.solde_restant || 0)) : 0;
+  /** 0 dans la config mock = hors quota (légitimation), pas une « carte » de jours. */
+  const maladieCfg = mal ? Number(mal.solde_initial || 0) : 0;
+  const maladieNonDecompte = maladieCfg <= 0;
+  const soldeMaladie = maladieNonDecompte
+    ? null
+    : Math.max(0, Number(mal?.solde_restant ?? 0));
+
+  /** @deprecated Agrégé tous types ; préférez soldeCongesPayes (+ details). Conservé pour compat. */
+  const totalRestantTousTypes = details.reduce(
+    (total, item) => total + Math.max(0, item.solde_restant || 0),
     0,
   );
 
   return {
-    solde: totalRestant,
+    /** Solde congés payés uniquement — utilisé formulaire « Congé payé ». */
+    solde: soldeCongesPayes,
+    soldeCongesPayes,
+    soldeCourteDuree,
+    /** Permission courte durée = RTT dans le mock. */
+    soldePermission: soldeCourteDuree,
+    soldeMaladie,
+    maladieNonDecompte,
     details,
     soldes: details,
+    reste: soldeCongesPayes,
+    soldeTotalTousTypes: totalRestantTousTypes,
   };
 };
 
@@ -729,7 +1113,7 @@ app.get("/api/conge/solde/:userId", (req, res) => {
 // ============================================
 
 app.post("/api/demande", (req, res) => {
-  const { userId, typeConge, dateDebut, dateFin, raison } = req.body;
+  const { userId, typeConge, dateDebut, dateFin, raison, heureDebut, heureFin } = req.body;
   const user = users[userId];
 
   if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
@@ -740,12 +1124,35 @@ app.post("/api/demande", (req, res) => {
   }
 
   const nombreJours = calculerJoursOuvrables(dateDebut, dateFin, user.pays);
-  const solde = kongesSoldes[userId]?.[typeConge]?.restant || 0;
+  const ledgerKey = normalizeCongeLedgerKey(typeConge);
 
-  if (nombreJours > solde) {
-    return res
-      .status(400)
-      .json({ error: `Solde insuffisant (${solde} jours restants)` });
+  if (!absenceSansDecoteAuSolde(ledgerKey)) {
+    const soldeRestant =
+      kongesSoldes[userId]?.[ledgerKey]?.restant ??
+      kongesSoldes[userId]?.[typeConge]?.restant ??
+      0;
+    if (nombreJours > soldeRestant) {
+      return res.status(400).json({
+        error: `Solde insuffisant (${soldeRestant} jours restants sur ${ledgerKey}).`,
+      });
+    }
+  }
+
+  if (
+    ledgerKey === "RTT" ||
+    String(typeConge).toUpperCase() === "RTT"
+  ) {
+    if (!heureDebut || !heureFin) {
+      return res.status(400).json({
+        error: "Pour une permission courte durée, heure début et heure fin sont obligatoires.",
+      });
+    }
+    const allowed = isWithinSchedule(user.pays, dateDebut, heureDebut, heureFin);
+    if (!allowed) {
+      return res.status(400).json({
+        error: "Permission refusée: horaire hors plage autorisée.",
+      });
+    }
   }
 
   const newDemande = {
@@ -754,6 +1161,8 @@ app.post("/api/demande", (req, res) => {
     typeConge,
     dateDebut,
     dateFin,
+    heureDebut: heureDebut || null,
+    heureFin: heureFin || null,
     nombreJours,
     raison,
     statut: "EN_ATTENTE",
@@ -872,29 +1281,28 @@ app.post("/api/demande/:id/rh-approve", (req, res) => {
 
   // 📊 MISE À JOUR DU SOLDE DE CONGÉ
   const employeeId = demande.userId;
-  const typeConge = demande.typeConge;
+  const typeCongeDemande = demande.typeConge;
+  const ledgerKey = normalizeCongeLedgerKey(typeCongeDemande);
   const nbreJours = demande.nombreJours || 1;
 
-  // Initialiser le solde s'il n'existe pas
-  if (!kongesSoldes[employeeId]) {
-    kongesSoldes[employeeId] = {};
+  if (!absenceSansDecoteAuSolde(ledgerKey)) {
+    if (!kongesSoldes[employeeId]) kongesSoldes[employeeId] = {};
+    if (!kongesSoldes[employeeId][ledgerKey]) {
+      kongesSoldes[employeeId][ledgerKey] = { utilise: 0, restant: 0 };
+    }
+    kongesSoldes[employeeId][ledgerKey].utilise += nbreJours;
+    const typesConges = typesCongePays[users[employeeId].pays] || {};
+    const totalJours = typesConges[ledgerKey]?.jours ?? 0;
+    kongesSoldes[employeeId][ledgerKey].restant =
+      totalJours - kongesSoldes[employeeId][ledgerKey].utilise;
+    console.log(
+      `✅ Solde LOCAL mis à jour: Utilisateur ${employeeId}, ${ledgerKey} (${typeCongeDemande}): +${nbreJours}j utilisés, Restant: ${kongesSoldes[employeeId][ledgerKey].restant}j`,
+    );
+  } else {
+    console.log(
+      `📋 Approbation sans décrément solde (${ledgerKey}): demande ${demande.id}`,
+    );
   }
-  if (!kongesSoldes[employeeId][typeConge]) {
-    kongesSoldes[employeeId][typeConge] = { utilise: 0, restant: 0 };
-  }
-
-  // Mettre à jour: ajouter les jours utilisés
-  kongesSoldes[employeeId][typeConge].utilise += nbreJours;
-
-  // Calculer le restant
-  const typesConges = typesCongePays[users[employeeId].pays] || {};
-  const totalJours = typesConges[typeConge]?.jours || 0;
-  kongesSoldes[employeeId][typeConge].restant =
-    totalJours - kongesSoldes[employeeId][typeConge].utilise;
-
-  console.log(
-    `✅ Solde LOCAL mis à jour: Utilisateur ${employeeId}, ${typeConge}: +${nbreJours}j utilisés, Restant: ${kongesSoldes[employeeId][typeConge].restant}j`,
-  );
 
   // � NOTE: Synchronisation Dolibarr BD en attente des credentials corrects
   demande.dolibarr_sync = false;
@@ -910,21 +1318,21 @@ app.post("/api/demande/:id/annuler", (req, res) => {
   // Si la demande était approuvée, restaurer le solde
   if (demande.statut === "APPROUVE_RH") {
     const employeeId = demande.userId;
-    const typeConge = demande.typeConge;
+    const ledgerKey = normalizeCongeLedgerKey(demande.typeConge);
     const nbreJours = demande.nombreJours || 1;
 
-    if (kongesSoldes[employeeId] && kongesSoldes[employeeId][typeConge]) {
-      // Restaurer les jours utilisés
-      kongesSoldes[employeeId][typeConge].utilise -= nbreJours;
-
-      // Recalculer le restant
+    if (
+      !absenceSansDecoteAuSolde(ledgerKey) &&
+      kongesSoldes[employeeId]?.[ledgerKey]
+    ) {
+      kongesSoldes[employeeId][ledgerKey].utilise -= nbreJours;
       const typesConges = typesCongePays[users[employeeId].pays] || {};
-      const totalJours = typesConges[typeConge]?.jours || 0;
-      kongesSoldes[employeeId][typeConge].restant =
-        totalJours - kongesSoldes[employeeId][typeConge].utilise;
+      const totalJours = typesConges[ledgerKey]?.jours ?? 0;
+      kongesSoldes[employeeId][ledgerKey].restant =
+        totalJours - kongesSoldes[employeeId][ledgerKey].utilise;
 
       console.log(
-        `🔄 Solde restauré: Utilisateur ${employeeId}, ${typeConge}: -${nbreJours}j, Restant: ${kongesSoldes[employeeId][typeConge].restant}j`,
+        `🔄 Solde restauré: Utilisateur ${employeeId}, ${ledgerKey}: -${nbreJours}j, Restant: ${kongesSoldes[employeeId][ledgerKey].restant}j`,
       );
     }
   }
@@ -1160,6 +1568,53 @@ app.get("/api/hr-config/leave-types", (req, res) => {
     active: true,
   }));
   return res.json(types);
+});
+
+app.get("/api/hr-config/work-schedules", (req, res) => {
+  const country = String(req.query.country || "TN").toUpperCase();
+  const type = String(req.query.type || "NORMAL").toUpperCase();
+  const schedule = ensureWorkSchedule(country);
+  return res.json({
+    countryCode: country,
+    scheduleType: type,
+    activeType: schedule.settings.activeType,
+    normalEnabled: schedule.settings.normalEnabled,
+    summerEnabled: schedule.settings.summerEnabled,
+    ramadanEnabled: schedule.settings.ramadanEnabled,
+    rows: schedule.types[type] || [],
+  });
+});
+
+app.put("/api/hr-config/work-schedules", (req, res) => {
+  const payload = req.body || {};
+  const country = String(payload.countryCode || "TN").toUpperCase();
+  const type = String(payload.scheduleType || "NORMAL").toUpperCase();
+  const schedule = ensureWorkSchedule(country);
+
+  schedule.settings.activeType = String(payload.activeType || schedule.settings.activeType || "NORMAL").toUpperCase();
+  schedule.settings.normalEnabled = Boolean(payload.normalEnabled ?? schedule.settings.normalEnabled);
+  schedule.settings.summerEnabled = Boolean(payload.summerEnabled ?? schedule.settings.summerEnabled);
+  schedule.settings.ramadanEnabled = Boolean(payload.ramadanEnabled ?? schedule.settings.ramadanEnabled);
+
+  if (Array.isArray(payload.rows)) {
+    schedule.types[type] = payload.rows.map((row) => ({
+      dayOfWeek: Number(row.dayOfWeek),
+      firstStart: row.firstStart || null,
+      firstEnd: row.firstEnd || null,
+      secondStart: row.secondStart || null,
+      secondEnd: row.secondEnd || null,
+    }));
+  }
+
+  return res.json({
+    countryCode: country,
+    scheduleType: type,
+    activeType: schedule.settings.activeType,
+    normalEnabled: schedule.settings.normalEnabled,
+    summerEnabled: schedule.settings.summerEnabled,
+    ramadanEnabled: schedule.settings.ramadanEnabled,
+    rows: schedule.types[type] || [],
+  });
 });
 
 app.get("/api/hr-config/integration-settings", (req, res) => {

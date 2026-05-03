@@ -1,6 +1,7 @@
 package com.example.conges.controller;
 
 import com.example.conges.dto.CalendarEventResponse;
+import com.example.conges.entity.UserEntity;
 import com.example.conges.service.CalendarService;
 import java.time.LocalDate;
 import java.util.List;
@@ -8,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -23,6 +25,7 @@ public class CalendarController {
     @GetMapping("/events")
     @PreAuthorize("hasAnyRole('RH','MANAGER','ADMIN')")
     public ResponseEntity<List<CalendarEventResponse>> getEvents(
+            @AuthenticationPrincipal UserEntity actor,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
             @RequestParam(required = false) Long employeeId,
@@ -30,6 +33,7 @@ public class CalendarController {
             @RequestParam(required = false) String country
     ) {
         return ResponseEntity.ok(calendarService.getEvents(
+                actor,
                 startDate,
                 endDate,
                 employeeId,

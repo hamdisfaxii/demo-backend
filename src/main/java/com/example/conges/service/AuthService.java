@@ -44,6 +44,8 @@ public class AuthService {
         Role role = resolveRole(user, dolibarrUser, email);
         String nom = dolibarrUser.getLastName();
         String prenom = dolibarrUser.getFirstName();
+        String paysRH = dolibarrService.resolveSupportedHrCountryIso2(
+                dolibarrUser.getId(), dolibarrUser);
 
         if (user == null) {
             user = UserEntity.builder()
@@ -52,7 +54,7 @@ public class AuthService {
                     .nom(nom)
                     .prenom(prenom)
                     .role(role)
-                    .pays(dolibarrUser.getCountryCode())
+                    .pays(paysRH)
                     .build();
         } else {
             user.setDolibarrId(dolibarrUser.getId());
@@ -60,9 +62,7 @@ public class AuthService {
             user.setNom(nom);
             user.setPrenom(prenom);
             user.setRole(role);
-            if (dolibarrUser.getCountryCode() != null) {
-                user.setPays(dolibarrUser.getCountryCode());
-            }
+            user.setPays(paysRH);
         }
         user = userRepository.save(user);
 

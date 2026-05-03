@@ -86,8 +86,12 @@ public class HrConfigService {
     public ExceptionalLeaveConfig updateExceptionalLeave(Long id, ExceptionalLeaveConfig payload) {
         ExceptionalLeaveConfig existing = exceptionalLeaveConfigRepository.findById(id)
                 .orElseThrow(() -> new EntityNotFoundException("Congé exceptionnel introuvable"));
-        if (payload.getCountryCode() != null) {
-            existing.setCountryCode(payload.getCountryCode().trim().toUpperCase());
+        if (payload.getCountryCode() != null && !payload.getCountryCode().isBlank()) {
+            String requestedCountry = payload.getCountryCode().trim().toUpperCase();
+            String currentCountry = String.valueOf(existing.getCountryCode()).trim().toUpperCase();
+            if (!requestedCountry.equals(currentCountry)) {
+                throw new IllegalArgumentException("Accès refusé: ce congé appartient à un autre pays.");
+            }
         }
         if (payload.getLabel() != null) {
             existing.setLabel(payload.getLabel().trim());

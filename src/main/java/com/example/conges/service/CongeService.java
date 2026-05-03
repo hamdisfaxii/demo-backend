@@ -51,6 +51,7 @@ public class CongeService {
     private final DolibarrService dolibarrService;
     private final EmployeeLeaveAllocationRepository employeeLeaveAllocationRepository;
     private final LeaveTypeRepository leaveTypeRepository;
+    private final HrWorkScheduleService hrWorkScheduleService;
 
     @Transactional
     public DemandeCongeResponse creerDemande(Long userId, DemandeCongeRequest request) {
@@ -65,6 +66,8 @@ public class CongeService {
         if (joursOuvrables <= 0) {
             throw new IllegalArgumentException("Aucun jour ouvrable dans la période choisie");
         }
+
+        hrWorkScheduleService.validatePermissionWithinWorkingHours(user, request);
 
         verifierSoldeDisponible(userId, request.getTypeConge(), joursOuvrables);
 

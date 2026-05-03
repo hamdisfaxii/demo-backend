@@ -35,9 +35,10 @@ public class HrDecisionService {
             LocalDate endDate
     ) {
         validateHrOrAdmin(actor);
+        String effectiveCountry = resolveCountryFilter(actor, country);
         return demandeCongeRepository.findPendingForHrPanel(
                 normalizeOptional(employee),
-                normalizeOptional(country),
+                effectiveCountry,
                 normalizeOptional(department),
                 startDate,
                 endDate
@@ -51,6 +52,9 @@ public class HrDecisionService {
             HrDecisionRequest request
     ) {
         validateHrOrAdmin(actor);
+        DemandeConge demande = demandeCongeRepository.findById(demandeId)
+                .orElseThrow(() -> new EntityNotFoundException("Demande introuvable"));
+        enforceCountryAccess(actor, demande);
         boolean approve = parseDecision(request.getAction());
         String comment = request.getComment() == null ? null : request.getComment().trim();
         return congeService.validerDemande(demandeId, actor.getId(), approve, comment);
@@ -61,16 +65,36 @@ public class HrDecisionService {
         validateHrOrAdmin(actor);
         DemandeConge demande = demandeCongeRepository.findById(demandeId)
                 .orElseThrow(() -> new EntityNotFoundException("Demande introuvable"));
+        enforceCountryAccess(actor, demande);
         return toHrResponse(demande);
     }
 
     @Transactional(readOnly = true)
     public Map<String, Long> getStats(UserEntity actor) {
         validateHrOrAdmin(actor);
+        String actorCountry = normalizeOptional(actor.getPays());
+        if (actor.getRole() != Role.ADMIN && actorCountry == null) {
+            throw new AccessDeniedException("Pays utilisateur introuvable.");
+        }
         Map<String, Long> stats = new HashMap<>();
-        long pending = demandeCongeRepository.countByStatut(com.example.conges.entity.StatutConge.EN_ATTENTE);
-        long approved = demandeCongeRepository.countByStatut(com.example.conges.entity.StatutConge.ACCEPTE);
-        long rejected = demandeCongeRepository.countByStatut(com.example.conges.entity.StatutConge.REFUSE);
+        long pending = actor.getRole() == Role.ADMIN
+                ? demandeCongeRepository.countByStatut(com.example.conges.entity.StatutConge.EN_ATTENTE)
+                : demandeCongeRepository.countByStatutAndUser_PaysIgnoreCase(
+                        com.example.conges.entity.StatutConge.EN_ATTENTE,
+                        actorCountry
+                );
+        long approved = actor.getRole() == Role.ADMIN
+                ? demandeCongeRepository.countByStatut(com.example.conges.entity.StatutConge.ACCEPTE)
+                : demandeCongeRepository.countByStatutAndUser_PaysIgnoreCase(
+                        com.example.conges.entity.StatutConge.ACCEPTE,
+                        actorCountry
+                );
+        long rejected = actor.getRole() == Role.ADMIN
+                ? demandeCongeRepository.countByStatut(com.example.conges.entity.StatutConge.REFUSE)
+                : demandeCongeRepository.countByStatutAndUser_PaysIgnoreCase(
+                        com.example.conges.entity.StatutConge.REFUSE,
+                        actorCountry
+                );
         stats.put("pending", pending);
         stats.put("approved", approved);
         stats.put("rejected", rejected);
@@ -99,6 +123,28 @@ public class HrDecisionService {
     private void validateHrOrAdmin(UserEntity actor) {
         if (actor == null || (actor.getRole() != Role.RH && actor.getRole() != Role.ADMIN)) {
             throw new AccessDeniedException("Accès réservé aux rôles RH/ADMIN");
+        }
+    }
+
+    private String resolveCountryFilter(UserEntity actor, String requestedCountry) {
+        if (actor.getRole() == Role.ADMIN) {
+            return normalizeOptional(requestedCountry);
+        }
+        String actorCountry = normalizeOptional(actor.getPays());
+        if (actorCountry == null) {
+            throw new AccessDeniedException("Pays utilisateur introuvable.");
+        }
+        return actorCountry;
+    }
+
+    private void enforceCountryAccess(UserEntity actor, DemandeConge demande) {
+        if (actor.getRole() == Role.ADMIN) {
+            return;
+        }
+        String actorCountry = normalizeOptional(actor.getPays());
+        String requestCountry = demande.getUser() == null ? null : normalizeOptional(demande.getUser().getPays());
+        if (actorCountry == null || requestCountry == null || !actorCountry.equalsIgnoreCase(requestCountry)) {
+            throw new AccessDeniedException("Accès refusé: demande d'un autre pays.");
         }
     }
 

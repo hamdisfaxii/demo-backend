@@ -4,6 +4,7 @@ import com.example.conges.entity.TypeConge;
 import javax.validation.constraints.NotBlank;
 import javax.validation.constraints.NotNull;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -28,6 +29,9 @@ public class DemandeCongeRequest {
     // Accepte commentaire ou motif indifféremment
     private String commentaire;
 
+    private LocalTime heureDebut;
+    private LocalTime heureFin;
+
     // Getter pour obtenir le TypeConge basé sur le titre
     public TypeConge getTypeConge() {
         if (titre == null) {
@@ -39,6 +43,9 @@ public class DemandeCongeRequest {
         }
         if (normalized.contains("sans solde")) {
             return TypeConge.SANS_SOLDE;
+        }
+        if (normalized.contains("courte") || normalized.contains("permission") || normalized.contains("sortie")) {
+            return TypeConge.COURTE_DUREE;
         }
         return TypeConge.PAYE;
     }

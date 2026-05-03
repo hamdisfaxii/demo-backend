@@ -36,6 +36,7 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
     );
 
     long countByStatut(StatutConge statut);
+    long countByStatutAndUser_PaysIgnoreCase(StatutConge statut, String pays);
 
     @Query("SELECT d.typeConge AS typeConge, COUNT(d) AS total FROM DemandeConge d GROUP BY d.typeConge")
     List<TypeDemandesCountProjection> countDemandesGroupedByTypeConge();

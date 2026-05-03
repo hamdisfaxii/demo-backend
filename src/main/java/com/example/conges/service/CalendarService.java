@@ -3,6 +3,8 @@ package com.example.conges.service;
 import com.example.conges.dto.CalendarEventResponse;
 import com.example.conges.entity.DemandeConge;
 import com.example.conges.entity.Holiday;
+import com.example.conges.entity.Role;
+import com.example.conges.entity.UserEntity;
 import com.example.conges.repository.DemandeCongeRepository;
 import com.example.conges.repository.HolidayRepository;
 import java.time.LocalDate;
@@ -21,6 +23,7 @@ public class CalendarService {
 
     @Transactional(readOnly = true)
     public List<CalendarEventResponse> getEvents(
+            UserEntity actor,
             LocalDate startDate,
             LocalDate endDate,
             Long employeeId,
@@ -28,13 +31,14 @@ public class CalendarService {
             String country
     ) {
         List<CalendarEventResponse> events = new ArrayList<>();
+        String effectiveCountry = resolveCountry(actor, country);
 
         List<DemandeConge> leaves = demandeCongeRepository.findApprovedForCalendar(
                 startDate,
                 endDate,
                 employeeId,
                 normalizeOptional(department),
-                normalizeOptionalCountry(country)
+                effectiveCountry
         );
         for (DemandeConge leave : leaves) {
             String fullName = (leave.getUser().getPrenom() + " " + leave.getUser().getNom()).trim();
@@ -55,7 +59,7 @@ public class CalendarService {
         List<Holiday> holidays = holidayRepository.findByDateRangeWithOptionalCountry(
                 startDate,
                 endDate,
-                normalizeOptionalCountry(country)
+                effectiveCountry
         );
         for (Holiday holiday : holidays) {
             events.add(CalendarEventResponse.builder()
@@ -81,5 +85,12 @@ public class CalendarService {
             return null;
         }
         return value.trim();
+    }
+
+    private String resolveCountry(UserEntity actor, String requestedCountry) {
+        if (actor != null && actor.getRole() == Role.ADMIN) {
+            return normalizeOptionalCountry(requestedCountry);
+        }
+        return normalizeOptionalCountry(actor == null ? null : actor.getPays());
     }
 }

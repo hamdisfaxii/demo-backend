@@ -18,8 +18,10 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +29,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClientException;
@@ -43,11 +46,25 @@ public class DolibarrService {
 
     private static final int OUTBOUND_MAX_RETRIES = 3;
 
+    private static final Map<String, String> ISO3166_ALPHA3_TO2 =
+            Map.of("FRA", "FR", "TUN", "TN", "MAR", "MA");
+    private static final Map<Integer, String> NUMERIC_ISO_TO_ALPHA2 =
+            Map.of(250, "FR", 788, "TN", 504, "MA");
+    private static final Set<String> FR_OVERSEAS_ISO2 =
+            Set.of(
+                    "GP", "MQ", "GF", "RE", "YT", "PM", "BL",
+                    "MF", "WF", "PF", "NC", "TF"
+            );
+
     private final UserRepository userRepository;
     private final EmployeeLeaveAllocationRepository employeeLeaveAllocationRepository;
     private final LeaveTypeRepository leaveTypeRepository;
     private final DolibarrSyncLogService dolibarrSyncLogService;
+    private final JdbcTemplate jdbcTemplate;
     private final RestTemplate restTemplate = new RestTemplate();
+
+    @Value("${dolibarr.database.table-prefix:llx_}")
+    private String dolibarrTablePrefix;
 
     @Value("${dolibarr.url:http://localhost/dolibarr/htdocs/api/index.php}")
     private String dolibarrUrl;
@@ -158,7 +175,9 @@ public class DolibarrService {
                 existingUser.setNom(doliEmployee.getLastName());
                 existingUser.setPrenom(doliEmployee.getFirstName());
                 existingUser.setEmail(doliEmployee.getEmail());
-                existingUser.setPays(doliEmployee.getCountryCode());
+                existingUser.setPays(
+                        normalizeToSupportedHrPays(
+                                resolveCountryCode(doliEmployee.getId(), doliEmployee)));
                 userRepository.save(existingUser);
                 dolibarrSyncLogService.logSuccess(
                         "USER",
@@ -177,7 +196,8 @@ public class DolibarrService {
                         .email(doliEmployee.getEmail())
                         .nom(doliEmployee.getLastName())
                         .prenom(doliEmployee.getFirstName())
-                        .pays(doliEmployee.getCountryCode())
+                        .pays(normalizeToSupportedHrPays(
+                                resolveCountryCode(doliEmployee.getId(), doliEmployee)))
                         .role(Role.EMPLOYE)  // Par défaut, tout nouvel employé est EMPLOYE
                         .build();
 
@@ -232,7 +252,8 @@ public class DolibarrService {
             existingUser.setDolibarrId(foundEmployee.getId());
             existingUser.setNom(foundEmployee.getLastName());
             existingUser.setPrenom(foundEmployee.getFirstName());
-            existingUser.setPays(foundEmployee.getCountryCode());
+            existingUser.setPays(normalizeToSupportedHrPays(
+                    resolveCountryCode(foundEmployee.getId(), foundEmployee)));
             userRepository.save(existingUser);
             log.info("Employé {} lié à Dolibarr (ID: {})", email, foundEmployee.getId());
             return existingUser;
@@ -242,7 +263,8 @@ public class DolibarrService {
                     .email(email)
                     .nom(foundEmployee.getLastName())
                     .prenom(foundEmployee.getFirstName())
-                    .pays(foundEmployee.getCountryCode())
+                    .pays(normalizeToSupportedHrPays(
+                            resolveCountryCode(foundEmployee.getId(), foundEmployee)))
                     .role(Role.EMPLOYE)
                     .build();
             userRepository.save(newUser);
@@ -708,6 +730,155 @@ public class DolibarrService {
                 payload
         );
         return false;
+    }
+
+    /** TN | FR | MA si reconnu après normalisation DOM ; sinon TN. */
+    public String normalizeToSupportedHrPays(String isoGuess) {
+        if (isoGuess == null || isoGuess.isBlank()) {
+            return "TN";
+        }
+        String u = isoGuess.trim().toUpperCase(Locale.ROOT);
+        u = mapFrenchOverseasToMetro(u);
+        if ("TN".equals(u) || "FR".equals(u) || "MA".equals(u)) {
+            return u;
+        }
+        return "TN";
+    }
+
+    /** À la connexion et pour la synchro employés depuis Dolibarr. */
+    public String resolveSupportedHrCountryIso2(Long dolibarrRowId, DolibarrEmployeeDto dto) {
+        return normalizeToSupportedHrPays(resolveCountryCode(dolibarrRowId, dto));
+    }
+
+    /**
+     * Priorité jointure utilisateur Dolibarr + table pays puis champs pays de la réponse API.
+     *
+     * @return Alpha-2 (DOM français normalisées en FR métropole métier), ou {@code null}
+     */
+    public String resolveCountryCode(Long dolibarrUserRowId, DolibarrEmployeeDto dto) {
+        String fromSql = iso2FromJoinRowJdbc(dolibarrUserRowId);
+        if (fromSql != null && !fromSql.isBlank()) {
+            return mapFrenchOverseasToMetro(fromSql.trim().toUpperCase(Locale.ROOT));
+        }
+        if (dto != null && dto.getCountryCode() != null && !dto.getCountryCode().isBlank()) {
+            return iso2FromMixedApi(dto.getCountryCode().trim());
+        }
+        return null;
+    }
+
+    private String iso2FromJoinRowJdbc(Long userRowId) {
+        if (userRowId == null) {
+            return null;
+        }
+        String tblUser = qualifiedDolibarrTableName("user");
+        String tblCountry = qualifiedDolibarrTableName("c_country");
+        String sql = "SELECT c.code AS c_code, c.code_iso AS c_code_iso, c.label AS c_label "
+                + "FROM `" + tblUser + "` u "
+                + "LEFT JOIN `" + tblCountry + "` c ON c.rowid = u.fk_country "
+                + "WHERE u.rowid = ? LIMIT 1";
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql, userRowId);
+            if (rows.isEmpty()) {
+                return null;
+            }
+            return rowToIso2Guess(rows.get(0));
+        } catch (Exception ex) {
+            log.debug("Lecture fk_country Dolibarr (SQL): {}", ex.getMessage());
+            return null;
+        }
+    }
+
+    private String qualifiedDolibarrTableName(String logicalSuffixSansLlPrefix) {
+        String prefix = dolibarrTablePrefix == null ? "llx_" : dolibarrTablePrefix.trim().replace("`", "");
+        prefix = prefix.replaceAll("[^a-zA-Z0-9_]", "");
+        if (prefix.isEmpty()) {
+            prefix = "llx";
+        }
+        if (!prefix.endsWith("_")) {
+            prefix += "_";
+        }
+        String base = logicalSuffixSansLlPrefix == null ? ""
+                : logicalSuffixSansLlPrefix.replaceFirst("(?i)^llx_", "").replaceAll("[^a-zA-Z0-9_]", "");
+        return prefix + base;
+    }
+
+    private static String rowToIso2Guess(Map<String, Object> row) {
+        String codeIso = toTrimmedString(row.get("c_code_iso"));
+        String code = toTrimmedString(row.get("c_code"));
+        String raw = firstNonBlank(codeIso, code);
+        String guessed = iso2FromMixedApi(raw);
+        if (guessed == null || guessed.isBlank()) {
+            guessed = iso2FromLabel(toTrimmedString(row.get("c_label")));
+        }
+        return guessed;
+    }
+
+    private static String toTrimmedString(Object o) {
+        if (o == null) {
+            return null;
+        }
+        String s = o.toString().trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        if (a != null && !a.isBlank()) {
+            return a;
+        }
+        return (b != null && !b.isBlank()) ? b : null;
+    }
+
+    private static String iso2FromMixedApi(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String s = raw.trim().toUpperCase(Locale.ROOT).replaceAll("\\s+", "");
+        if (s.matches("\\d{1,3}")) {
+            try {
+                int n = Integer.parseInt(s);
+                String r = NUMERIC_ISO_TO_ALPHA2.get(n);
+                return r != null ? mapFrenchOverseasToMetro(r) : null;
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        if (s.length() == 2 && s.matches("[A-Z]{2}")) {
+            return mapFrenchOverseasToMetro(s);
+        }
+        if (s.length() == 3) {
+            String r = ISO3166_ALPHA3_TO2.get(s);
+            return r != null ? mapFrenchOverseasToMetro(r) : null;
+        }
+        return null;
+    }
+
+    private static String iso2FromLabel(String label) {
+        if (label == null || label.isBlank()) {
+            return null;
+        }
+        String t = label.toLowerCase(Locale.ROOT);
+        if (t.contains("tunis")) {
+            return "TN";
+        }
+        if (t.contains("maroc")) {
+            return "MA";
+        }
+        if (t.contains("franc") || t.contains("france")) {
+            return "FR";
+        }
+        return null;
+    }
+
+    /** Outre-mer français → même socle quotas que métropole. */
+    private static String mapFrenchOverseasToMetro(String iso2) {
+        if (iso2 == null || iso2.isBlank()) {
+            return iso2;
+        }
+        String u = iso2.trim().toUpperCase(Locale.ROOT);
+        if (FR_OVERSEAS_ISO2.contains(u)) {
+            return "FR";
+        }
+        return u;
     }
 
     /**

@@ -2,6 +2,7 @@ package com.example.conges.controller;
 
 import com.example.conges.dto.DemandeCongeRequest;
 import com.example.conges.dto.DemandeCongeResponse;
+import com.example.conges.dto.config.WorkScheduleConfigResponse;
 import com.example.conges.entity.Role;
 import com.example.conges.entity.UserEntity;
 import com.example.conges.service.CongeService;
@@ -44,6 +45,18 @@ public class CongeController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
         return ResponseEntity.ok(congeService.getSoldeResponseMap(user.getId()));
+    }
+
+    /**
+     * Horaires de travail du pays métier pour caler créneaux « courte durée » / RTT front.
+     */
+    @GetMapping("/meta/work-schedule")
+    public ResponseEntity<WorkScheduleConfigResponse> getMyWorkSchedule(
+            @AuthenticationPrincipal UserEntity user) {
+        if (user == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+        return ResponseEntity.ok(congeService.getActiveWorkScheduleForUser(user.getId()));
     }
 
     /**

@@ -4,6 +4,7 @@ import com.example.conges.dto.DemandeCongeRequest;
 import com.example.conges.dto.DemandeCongeResponse;
 import com.example.conges.dto.SoldeCongeResponse;
 import com.example.conges.dto.StatistiquesRhResponse;
+import com.example.conges.dto.config.WorkScheduleConfigResponse;
 import com.example.conges.entity.DemandeConge;
 import com.example.conges.entity.EmployeeLeaveAllocation;
 import com.example.conges.entity.LeaveType;
@@ -61,6 +62,7 @@ public class CongeService {
     private final HrWorkScheduleService hrWorkScheduleService;
     private final HourlyLeaveCapEvaluator hourlyLeaveCapEvaluator;
     private final FranceRttLedgerService franceRttLedgerService;
+    private final NotificationService notificationService;
 
     @Transactional
     public DemandeCongeResponse creerDemande(Long userId, DemandeCongeRequest request) {
@@ -380,6 +382,17 @@ public class CongeService {
                 .orElseThrow(() -> new EntityNotFoundException("Utilisateur introuvable"));
         List<SoldeCongeResponse> soldes = calculerSolde(userId);
         return buildSoldeApiMap(principal, soldes);
+    }
+
+    /**
+     * Horaires actifs du pays métier de l’employé (même source que la validation des permissions courtes).
+     */
+    @Transactional(readOnly = true)
+    public WorkScheduleConfigResponse getActiveWorkScheduleForUser(Long userId) {
+        UserEntity user = userRepository.findById(userId)
+                .orElseThrow(() -> new EntityNotFoundException("Utilisateur introuvable"));
+        String country = countryPolicyService.normalizeBusinessCountry(user.getPays());
+        return hrWorkScheduleService.getConfig(country, null);
     }
 
     private Map<String, Object> buildSoldeApiMap(UserEntity user, List<SoldeCongeResponse> soldes) {
@@ -702,8 +715,44 @@ public class CongeService {
         } else {
             historyService.recordRejection(employe, saved, commentaire != null ? commentaire : "Rejet sans motif spécifié");
         }
-        
+
+        String nomValidateur =
+                "%s %s".formatted(truncateName(rh.getPrenom()), truncateName(rh.getNom())).trim();
+        notifyEmployeurDecisionRh(employe, saved, rh, nomValidateur, commentaire);
+
         return toResponse(saved);
+    }
+
+    private static String truncateName(String part) {
+        return part != null ? part.trim() : "";
+    }
+
+    private void notifyEmployeurDecisionRh(
+            UserEntity employe,
+            DemandeConge saved,
+            UserEntity rh,
+            String validateurNom,
+            String commentaireBrut
+    ) {
+        if (employe == null || !StringUtils.hasText(employe.getEmail())) {
+            return;
+        }
+        try {
+            if (saved.getStatut() == StatutConge.ACCEPTE) {
+                notificationService.notifyDemandeApproved(
+                        employe, saved, StringUtils.hasText(validateurNom) ? validateurNom : rh.getEmail());
+            } else if (saved.getStatut() == StatutConge.REFUSE) {
+                String motif = StringUtils.hasText(saved.getCommentaireRh())
+                        ? saved.getCommentaireRh().trim()
+                        : (commentaireBrut != null ? commentaireBrut.trim() : "");
+                if (!StringUtils.hasText(motif)) {
+                    motif = "Aucun motif précisé.";
+                }
+                notificationService.notifyDemandeRejected(employe, saved, motif);
+            }
+        } catch (RuntimeException ex) {
+            log.warn("SMTP : notification RH non envoyée pour la demande {} : {}", saved.getId(), ex.getMessage());
+        }
     }
 
     @Transactional(readOnly = true)

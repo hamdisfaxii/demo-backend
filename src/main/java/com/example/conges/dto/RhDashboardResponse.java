@@ -15,6 +15,13 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class RhDashboardResponse {
 
+    /** Compteurs explicites (évite les écarts de parsing JSON des clés d’énum côté front). */
+    private Long demandesEnAttente;
+    private Long demandesAcceptees;
+    private Long demandesRefusees;
+    private Long demandesAnnulees;
+    private Long demandesTotal;
+
     private Map<StatutConge, Long> demandesParStatut;
     private Map<String, Long> demandesParMois;
     private Map<TypeConge, Long> demandesParType;

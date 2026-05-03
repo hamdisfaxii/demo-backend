@@ -1374,6 +1374,32 @@ app.get("/api/conge/solde/:userId", (req, res) => {
   return res.json(response);
 });
 
+app.get("/api/conge/meta/work-schedule", (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Non authentifie" });
+
+  const userId = parseInt(token.split("_")[1]);
+  if (!Number.isInteger(userId)) {
+    return res.status(401).json({ error: "Token invalide" });
+  }
+
+  const u = users[userId];
+  if (!u) return res.status(404).json({ error: "Utilisateur non trouve" });
+
+  const country = normalizePaysForQuota(u.pays || "TN");
+  const schedule = ensureWorkSchedule(country);
+  const activeType = schedule.settings.activeType || "NORMAL";
+  return res.json({
+    countryCode: country,
+    scheduleType: activeType,
+    activeType,
+    normalEnabled: schedule.settings.normalEnabled,
+    summerEnabled: schedule.settings.summerEnabled,
+    ramadanEnabled: schedule.settings.ramadanEnabled,
+    rows: schedule.types[activeType] || [],
+  });
+});
+
 // ============================================
 // DEMANDES DE CONGÉS
 // ============================================
@@ -1689,11 +1715,25 @@ app.post("/api/demande/:id/reject", (req, res) => {
 
 app.get("/api/rh/dashboard", (req, res) => {
   const totalDemandes = demandes.length;
-  const enAttente = demandes.filter(
-    (d) => d.statut.includes("EN_ATTENTE") || d.statut.includes("MANAGER"),
-  ).length;
-  const approuvees = demandes.filter((d) => d.statut === "APPROUVE").length;
-  const rejetees = demandes.filter((d) => d.statut === "REJETE").length;
+  const st = (d) => String(d.statut || "").toUpperCase();
+  const enAttente = demandes.filter((d) => {
+    const s = st(d);
+    return s.includes("EN_ATTENTE") || s.includes("MANAGER") || s.includes("PENDING");
+  }).length;
+  const approuvees = demandes.filter((d) => {
+    const s = st(d);
+    return (
+      s === "ACCEPTE" ||
+      s === "APPROUVE" ||
+      s === "APPROUVE_RH" ||
+      s.includes("ACCEPTE") ||
+      s.includes("APPROUVE")
+    );
+  }).length;
+  const rejetees = demandes.filter((d) => {
+    const s = st(d);
+    return s === "REFUSE" || s === "REJETE" || s.includes("REFUS");
+  }).length;
 
   const demandesParPays = {};
   demandes.forEach((d) => {
@@ -1707,6 +1747,10 @@ app.get("/api/rh/dashboard", (req, res) => {
   });
 
   return res.json({
+    demandesEnAttente: enAttente,
+    demandesAcceptees: approuvees,
+    demandesRefusees: rejetees,
+    demandesTotal: totalDemandes,
     statistiques: {
       total_demandes: totalDemandes,
       en_attente: enAttente,
@@ -2329,6 +2373,7 @@ app.listen(PORT, () => {
   console.log(`  • POST   /api/auth/login`);
   console.log(`  • GET    /api/auth/current-user`);
   console.log(`  • GET    /api/conge/solde/:userId`);
+  console.log(`  • GET    /api/conge/meta/work-schedule`);
   console.log(`  • POST   /api/demande`);
   console.log(`  • GET    /api/demande/user/:userId`);
   console.log(`  • POST   /api/demande/:id/manager-approve`);

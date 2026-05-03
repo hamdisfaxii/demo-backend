@@ -18,6 +18,7 @@ import com.example.conges.service.CountryPolicyService;
 import com.example.conges.service.HrConfigService;
 import com.example.conges.service.HrHolidayService;
 import com.example.conges.service.HrWorkScheduleService;
+import com.fasterxml.jackson.databind.JsonNode;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -178,7 +179,8 @@ public class HrConfigController {
     public ResponseEntity<Map<String, Object>> importPublicHolidays(
             @AuthenticationPrincipal UserEntity user,
             @RequestParam(name = "country") String country,
-            @RequestParam(name = "year") Integer year
+            @RequestParam(name = "year") Integer year,
+            @RequestBody(required = false) JsonNode ignoredBody
     ) {
         String resolvedCountry = resolveCountry(user, country);
         int imported = hrHolidayService.importPublicHolidays(resolvedCountry, year);
@@ -192,7 +194,8 @@ public class HrConfigController {
 
     @PostMapping("/public-holidays/import-all")
     public ResponseEntity<Map<String, Object>> importPublicHolidaysAll(
-            @RequestParam(name = "year", required = false) Integer year
+            @RequestParam(name = "year", required = false) Integer year,
+            @RequestBody(required = false) JsonNode ignoredBody
     ) {
         return ResponseEntity.ok(hrHolidayService.importPublicHolidaysAllCountries(year));
     }

@@ -90,6 +90,9 @@ public class WorkflowService {
         if (!approved) {
             demande.setStatut(StatutConge.REFUSE);
             demande.setDateTraitement(LocalDateTime.now());
+            if (comment != null && !comment.isBlank()) {
+                demande.setCommentaireRh(comment.trim());
+            }
             return demandeCongeRepository.save(demande);
         }
 

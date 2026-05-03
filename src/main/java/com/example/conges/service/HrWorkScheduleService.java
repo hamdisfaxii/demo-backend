@@ -117,7 +117,8 @@ public class HrWorkScheduleService {
         if (row == null
                 || (!isWithin(row.getFirstStart(), row.getFirstEnd(), start, end)
                         && !isWithin(row.getSecondStart(), row.getSecondEnd(), start, end))) {
-            throw new IllegalArgumentException("Permission hors horaires autorisés pour ce jour.");
+            throw new IllegalArgumentException(
+                    "Les heures de la permission doivent être entièrement comprises dans les horaires de travail configurés pour ce jour (consultez votre fiche créneaux définie par les RH).");
         }
 
         String paysMetier = countryPolicyService.normalizeBusinessCountry(user.getPays());

@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/rh")
 @RequiredArgsConstructor
-@PreAuthorize("hasRole('RH')")
+@PreAuthorize("hasAnyRole('RH','ADMIN','MANAGER')")
 public class RhDashboardController {
 
     private final RhDashboardService rhDashboardService;

@@ -33,8 +33,19 @@ public class RhDashboardService {
 
     @Transactional(readOnly = true)
     public RhDashboardResponse getDashboardComplet() {
+        Map<StatutConge, Long> parStatut = getDemandesParStatut();
+        long enAttente = parStatut.getOrDefault(StatutConge.EN_ATTENTE, 0L);
+        long acceptees = parStatut.getOrDefault(StatutConge.ACCEPTE, 0L);
+        long refusees = parStatut.getOrDefault(StatutConge.REFUSE, 0L);
+        long annulees = parStatut.getOrDefault(StatutConge.ANNULE, 0L);
+        long total = parStatut.values().stream().mapToLong(Long::longValue).sum();
         return RhDashboardResponse.builder()
-                .demandesParStatut(getDemandesParStatut())
+                .demandesEnAttente(enAttente)
+                .demandesAcceptees(acceptees)
+                .demandesRefusees(refusees)
+                .demandesAnnulees(annulees)
+                .demandesTotal(total)
+                .demandesParStatut(parStatut)
                 .demandesParMois(getDemandesParMois())
                 .demandesParType(getDemandesParType())
                 .employesAlerteSolde(getEmployesAlerteSolde())

@@ -21,6 +21,8 @@ import lombok.NoArgsConstructor;
 /**
  * Entité pour tracer l'historique de toutes les actions sur les demandes de congés.
  * Logs automatiques et filtrage/export possibles.
+ * <p>En base : éviter {@code ON DELETE CASCADE} sur {@code user_id} — supprimer un utilisateur
+ * effacerait toutes ses lignes d’historique (problème fréquent en recréant les comptes en local).
  */
 @Entity
 @Table(name = "history", indexes = {

@@ -33,3 +33,6 @@ logs/
 # Database
 *.db
 *.sqlite
+
+# Mock Node : état persistant local (mots de passe démo, demandes, soldes…)
+mock-persist.json

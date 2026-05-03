@@ -14,12 +14,16 @@
  * - Authentification unifiée via Dolibarr
  */
 
+const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const mysql = require("mysql2/promise");
 const Holidays = require("date-holidays");
-require("dotenv").config();
+// Toujours charger .env à côté de ce fichier (pas le cwd), sinon les mails « marchent une fois » puis plus si npm start est lancé depuis un autre dossier.
+require("dotenv").config({ path: path.join(__dirname, ".env") });
+const notificationService = require("./notification-service");
 const app = express();
 const PORT = Number(process.env.SERVER_PORT || 8080);
 
@@ -877,6 +881,155 @@ let workflowRules = [
 ];
 
 // ============================================
+// Persistance mock (fichier JSON)
+// ============================================
+// Cause des listes « vides » après beaucoup de modifs : le serveur Node redémarre
+// (nodemon, npm run start, etc.) et les variables en mémoire (demandes, soldes, …)
+// repartaient des seeds. Ce fichier conserve l’état entre redémarrages.
+// Désactiver : MOCK_PERSIST_DISABLE=1  |  Chemin : MOCK_PERSIST_PATH=mock-persist.json
+const MOCK_PERSIST_VERSION = 1;
+const MOCK_PERSIST_DEBOUNCE_MS = 600;
+
+function mockPersistDisabled() {
+  const v = String(process.env.MOCK_PERSIST_DISABLE || "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+function getMockPersistPath() {
+  const custom = String(process.env.MOCK_PERSIST_PATH || "").trim();
+  if (custom) {
+    return path.isAbsolute(custom) ? custom : path.join(__dirname, custom);
+  }
+  return path.join(__dirname, "mock-persist.json");
+}
+
+function restorePublicHolidaysStoreFromPersist(obj) {
+  if (!obj || typeof obj !== "object") return;
+  for (const k of Object.keys(publicHolidaysStore)) {
+    delete publicHolidaysStore[k];
+  }
+  Object.assign(publicHolidaysStore, obj);
+  let max = 0;
+  for (const rows of Object.values(publicHolidaysStore)) {
+    for (const h of rows || []) {
+      const n = Number(h && h.id);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+  }
+  publicHolidaySeq = Math.max(publicHolidaySeq, max + 1);
+}
+
+function getMockPersistPayload() {
+  return {
+    version: MOCK_PERSIST_VERSION,
+    savedAt: new Date().toISOString(),
+    demandes,
+    kongesSoldes,
+    validPasswords,
+    users,
+    publicHolidaysStore,
+    exceptionalLeavesByCountry,
+    workflowRules,
+    workSchedulesByCountry,
+    publicHolidaySeq,
+  };
+}
+
+function saveMockPersistSync() {
+  if (mockPersistDisabled()) return;
+  try {
+    fs.writeFileSync(
+      getMockPersistPath(),
+      JSON.stringify(getMockPersistPayload(), null, 2),
+      "utf8",
+    );
+  } catch (e) {
+    console.warn("⚠ mock-persist: écriture impossible:", e.message);
+  }
+}
+
+let mockPersistTimer = null;
+function scheduleMockPersist() {
+  if (mockPersistDisabled()) return;
+  clearTimeout(mockPersistTimer);
+  mockPersistTimer = setTimeout(() => {
+    mockPersistTimer = null;
+    saveMockPersistSync();
+  }, MOCK_PERSIST_DEBOUNCE_MS);
+}
+
+function loadMockPersistSync() {
+  if (mockPersistDisabled()) return;
+  const p = getMockPersistPath();
+  if (!fs.existsSync(p)) return;
+  try {
+    const raw = fs.readFileSync(p, "utf8");
+    const data = JSON.parse(raw);
+    if (!data || Number(data.version) !== MOCK_PERSIST_VERSION) {
+      console.warn(
+        "⚠ mock-persist: version fichier inattendue (ignoré). Attendu:",
+        MOCK_PERSIST_VERSION,
+      );
+      return;
+    }
+    if (Array.isArray(data.demandes)) {
+      demandes = data.demandes;
+    }
+    if (data.kongesSoldes && typeof data.kongesSoldes === "object") {
+      for (const k of Object.keys(kongesSoldes)) {
+        delete kongesSoldes[k];
+      }
+      Object.assign(kongesSoldes, data.kongesSoldes);
+    }
+    if (data.validPasswords && typeof data.validPasswords === "object") {
+      Object.assign(validPasswords, data.validPasswords);
+    }
+    if (data.users && typeof data.users === "object") {
+      Object.assign(users, data.users);
+    }
+    if (data.publicHolidaysStore && typeof data.publicHolidaysStore === "object") {
+      restorePublicHolidaysStoreFromPersist(data.publicHolidaysStore);
+    }
+    if (data.exceptionalLeavesByCountry && typeof data.exceptionalLeavesByCountry === "object") {
+      for (const k of Object.keys(exceptionalLeavesByCountry)) {
+        delete exceptionalLeavesByCountry[k];
+      }
+      Object.assign(exceptionalLeavesByCountry, data.exceptionalLeavesByCountry);
+    }
+    if (Array.isArray(data.workflowRules)) {
+      workflowRules.length = 0;
+      workflowRules.push(...data.workflowRules);
+    }
+    if (data.workSchedulesByCountry && typeof data.workSchedulesByCountry === "object") {
+      for (const k of Object.keys(workSchedulesByCountry)) {
+        delete workSchedulesByCountry[k];
+      }
+      Object.assign(workSchedulesByCountry, data.workSchedulesByCountry);
+    }
+    if (Number.isFinite(Number(data.publicHolidaySeq))) {
+      publicHolidaySeq = Math.max(publicHolidaySeq, Number(data.publicHolidaySeq));
+    }
+    console.log("✅ Données mock restaurées depuis:", p);
+  } catch (e) {
+    console.warn("⚠ mock-persist: lecture ignorée:", e.message);
+  }
+}
+
+loadMockPersistSync();
+
+function flushMockPersistOnShutdown() {
+  if (mockPersistDisabled()) return;
+  if (mockPersistTimer) {
+    clearTimeout(mockPersistTimer);
+    mockPersistTimer = null;
+  }
+  saveMockPersistSync();
+}
+
+process.on("SIGINT", flushMockPersistOnShutdown);
+process.on("SIGTERM", flushMockPersistOnShutdown);
+
+// ============================================
 // UTILITAIRES
 // ============================================
 
@@ -968,22 +1121,205 @@ function toRhRequestDto(demande) {
 // AUTHENTIFICATION - INTÉGRATION DOLIBARR
 // ============================================
 
-app.post("/api/auth/login", async (req, res) => {
-  const { email, password } = req.body;
+function extractDolibarrRowIdFromLoginBody(data) {
+  if (!data || typeof data !== "object") return null;
+  const raw =
+    data.rowid ??
+    data.id ??
+    data.fk_user ??
+    data.userid ??
+    (data.user && (data.user.rowid ?? data.user.id));
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
+/** Construit l’objet `user` mock à partir d’une ligne API Dolibarr (/users ou /users/:id). */
+function buildAppUserFromDolibarrApiRow(dolibarrUser) {
+  if (!dolibarrUser || typeof dolibarrUser !== "object") return null;
+  flattenDolibarrCountryPayload(dolibarrUser);
+  let role = "EMPLOYEE";
+  const adminFlag = Number(dolibarrUser.admin) === 1;
+  const superAdminFlag = Number(dolibarrUser.superadmin) === 1;
+  const loginHint = String(dolibarrUser.login || "").toLowerCase();
+  const emailHint = String(dolibarrUser.email || "").toLowerCase();
+  if (
+    adminFlag ||
+    superAdminFlag ||
+    loginHint.includes("admin") ||
+    emailHint.includes("admin")
+  ) {
+    role = "DRH";
+  }
+
+  const rowid = Number(dolibarrUser.rowid ?? dolibarrUser.id);
+  const userId =
+    Number.isFinite(rowid) && rowid > 0 ? rowid : Math.floor(Math.random() * 1000);
+  const paysGuess = normalizePaysForQuota(
+    isoCountryFromDolibarrPayload(dolibarrUser) || "TN",
+  );
+
+  const user = {
+    id: userId,
+    email: String(dolibarrUser.email || dolibarrUser.login || "").trim(),
+    fullName: `${dolibarrUser.firstname || ""} ${dolibarrUser.lastname || ""}`.trim(),
+    role,
+    pays: paysGuess,
+    departement: dolibarrUser.department || "General",
+    dolibarr_id:
+      Number.isFinite(rowid) && rowid > 0
+        ? rowid
+        : Number(dolibarrUser.id ?? userId),
+  };
+
+  return { user, dolibarrUser };
+}
+
+/**
+ * POST /login Dolibarr (comme Spring DolibarrService).
+ * @returns {Promise<{ ok: boolean, data?: object, loginUsed?: string }>}
+ */
+async function postDolibarrLoginSingle(loginStr, password) {
+  const login = String(loginStr ?? "").trim();
+  const pass = String(password ?? "");
+  if (!login || !pass) return { ok: false };
+  const apiKey = String(DOLIBARR_API_KEY || "").trim();
+  if (!apiKey) return { ok: false };
+  const base = String(DOLIBARR_URL || "").replace(/\/+$/, "");
+  if (!base) return { ok: false };
+
+  const headers = {
+    DOLAPIKEY: apiKey,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+  };
+  const body = JSON.stringify({ login, password: pass });
+
+  for (const path of ["/login", "/auth/login"]) {
+    try {
+      const res = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers,
+        body,
+      });
+      const text = await res.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = null;
+      }
+      if (res.ok) {
+        if (data && (data.success === 0 || data.success === false)) {
+          continue;
+        }
+        return { ok: true, data: data || {}, loginUsed: login };
+      }
+    } catch {
+      /* réseau / Dolibarr arrêté */
+    }
+  }
+  return { ok: false };
+}
+
+async function tryDolibarrLoginFirst(candidates, password) {
+  const seen = new Set();
+  for (const c of candidates) {
+    const s = String(c ?? "").trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    const r = await postDolibarrLoginSingle(s, password);
+    if (r.ok) return r;
+  }
+  return { ok: false };
+}
+
+async function verifyDolibarrWithLoginCandidates(candidates, password) {
+  const r = await tryDolibarrLoginFirst(candidates, password);
+  return r.ok === true;
+}
+
+app.post("/api/auth/login", async (req, res) => {
   try {
+    const email = String(req.body?.email ?? "").trim();
+    const password = String(req.body?.password ?? "").trim();
+    if (email.length === 0 || password.length === 0) {
+      return res.status(400).json({
+        code: "MISSING_CREDENTIALS",
+        error: "Saisissez votre email et votre mot de passe.",
+      });
+    }
+
     console.log("🔐 Login attempt:", email);
 
     // Faire un fallback: d'abord essayer Dolibarr, sinon utiliser les users locaux
     let user = null;
     let dolibarrLoginPayload = null;
+    let dolibarrPasswordVerifiedEarly = false;
+
+    const apiKeyTrim = String(DOLIBARR_API_KEY || "").trim();
+    const baseUrlTrim = String(DOLIBARR_URL || "").trim().replace(/\/+$/, "");
+
+    // 0. Si la liste /users échoue ou ne contient pas l’employé, Dolibarr accepte quand même /login avec login+mdp.
+    if (apiKeyTrim && baseUrlTrim) {
+      const earlyCandidates = [email, email.toLowerCase(), email.toUpperCase()].filter(
+        (v, i, a) => a.indexOf(v) === i && String(v).trim().length > 0,
+      );
+      const early = await tryDolibarrLoginFirst(earlyCandidates, password);
+      if (early.ok) {
+        const uid = extractDolibarrRowIdFromLoginBody(early.data);
+        if (uid != null) {
+          try {
+            const ur = await fetch(`${baseUrlTrim}/users/${uid}`, {
+              method: "GET",
+              headers: {
+                DOLAPIKEY: apiKeyTrim,
+                Accept: "application/json",
+              },
+            });
+            if (ur.ok) {
+              const dj = await ur.json();
+              const built = buildAppUserFromDolibarrApiRow(dj);
+              if (built) {
+                user = built.user;
+                dolibarrLoginPayload = built.dolibarrUser;
+                users[user.id] = user;
+                console.log("✅ Dolibarr: /login OK + profil GET /users/", uid);
+              }
+            }
+          } catch (e) {
+            console.log("⚠️ GET /users/:id après login Dolibarr:", e?.message || e);
+          }
+        }
+        if (!user) {
+          const uid2 = extractDolibarrRowIdFromLoginBody(early.data);
+          const synthetic = {
+            rowid: uid2,
+            id: uid2,
+            email: String(early.data?.email || email || "").trim(),
+            firstname: early.data?.firstname || "",
+            lastname: early.data?.lastname || "",
+            login: String(early.loginUsed || email || "").trim(),
+          };
+          const built = buildAppUserFromDolibarrApiRow(synthetic);
+          if (built) {
+            user = built.user;
+            dolibarrLoginPayload = { ...early.data, ...synthetic };
+            users[user.id] = user;
+            console.log("✅ Dolibarr: /login (profil détaillé GET /users/:id indisponible)", user.email);
+          }
+        }
+        if (user) {
+          dolibarrPasswordVerifiedEarly = true;
+        }
+      }
+    }
 
     try {
       // 1. Récupérer TOUS les utilisateurs depuis Dolibarr API endpoint /users
-      const dolibarrResponse = await fetch(`${DOLIBARR_URL}/users`, {
+      const dolibarrResponse = await fetch(`${baseUrlTrim}/users`, {
         method: "GET",
         headers: {
-          DOLAPIKEY: DOLIBARR_API_KEY,
+          DOLAPIKEY: apiKeyTrim || String(DOLIBARR_API_KEY || "").trim(),
           Accept: "application/json",
         },
       });
@@ -1002,55 +1338,24 @@ app.post("/api/auth/login", async (req, res) => {
 
         // Dolibarr retourne un array de tous les users
         if (dolibarrUsers && Array.isArray(dolibarrUsers)) {
-          // Filtrer par email en JavaScript (SÉCURISÉ - pas d'injection SQL)
+          const want = String(email || "").trim().toLowerCase();
+          // Même identifiant que sur l’écran Dolibarr : email OU login
           const dolibarrUser = dolibarrUsers.find(
             (u) =>
               u &&
-              email &&
-              String(u.email || "").toLowerCase() === String(email).toLowerCase(),
+              want &&
+              (String(u.email || "").trim().toLowerCase() === want ||
+                String(u.login || "").trim().toLowerCase() === want),
           );
 
           if (dolibarrUser) {
-            dolibarrLoginPayload = dolibarrUser;
-            flattenDolibarrCountryPayload(dolibarrUser);
-            // Déterminer le rôle (supporte int/string selon versions Dolibarr)
-            let role = "EMPLOYEE";
-            const adminFlag = Number(dolibarrUser.admin) === 1;
-            const superAdminFlag = Number(dolibarrUser.superadmin) === 1;
-            const loginHint = String(dolibarrUser.login || "").toLowerCase();
-            const emailHint = String(dolibarrUser.email || "").toLowerCase();
-            if (
-              adminFlag ||
-              superAdminFlag ||
-              loginHint.includes("admin") ||
-              emailHint.includes("admin")
-            ) {
-              role = "DRH";
+            const built = buildAppUserFromDolibarrApiRow(dolibarrUser);
+            if (built) {
+              user = built.user;
+              dolibarrLoginPayload = built.dolibarrUser;
+              users[user.id] = user;
+              console.log("✅ User found in Dolibarr:", user.fullName);
             }
-
-            const rowid = Number(dolibarrUser.rowid ?? dolibarrUser.id);
-            const userId =
-              Number.isFinite(rowid) ? rowid : Math.floor(Math.random() * 1000);
-            const paysGuess = normalizePaysForQuota(
-              isoCountryFromDolibarrPayload(dolibarrUser) || "TN",
-            );
-
-            user = {
-              id: userId,
-              email: dolibarrUser.email,
-              fullName:
-                (dolibarrUser.firstname || "") +
-                " " +
-                (dolibarrUser.lastname || ""),
-              role: role,
-              pays: paysGuess,
-              departement: dolibarrUser.department || "General",
-              dolibarr_id: Number.isFinite(rowid)
-                ? rowid
-                : Number(dolibarrUser.id ?? userId),
-            };
-            users[userId] = user;
-            console.log("✅ User found in Dolibarr:", user.fullName);
           } else {
             console.log("⚠️  User email not found in Dolibarr users:", email);
           }
@@ -1067,9 +1372,14 @@ app.post("/api/auth/login", async (req, res) => {
       );
     }
 
-    // 2. Si pas trouvé dans Dolibarr, chercher dans les users locaux
+    // 2. Si pas trouvé dans Dolibarr, chercher dans les users locaux (email ou username, insensible à la casse)
     if (!user) {
-      user = Object.values(users).find((u) => u.email === email);
+      const emailLc = String(email || "").trim().toLowerCase();
+      user = Object.values(users).find(
+        (u) =>
+          String(u.email || "").trim().toLowerCase() === emailLc ||
+          String(u.username || "").trim().toLowerCase() === emailLc,
+      );
       if (user) {
         console.log("✅ User found locally:", user.fullName);
       }
@@ -1078,30 +1388,100 @@ app.post("/api/auth/login", async (req, res) => {
     // 3. Vérifier que l'utilisateur existe
     if (!user) {
       console.log("❌ User not found");
-      return res.status(401).json({ error: "Utilisateur non trouvé" });
+      return res.status(401).json({
+        code: "USER_NOT_FOUND",
+        error: "Aucun compte ne correspond à cet email.",
+      });
     }
 
-    // 4. Valider le password
-    // Pour les utilisateurs LOCAUX: vérifier le password
-    // Pour les utilisateurs DOLIBARR: accepter le premier password (créer une session Dolibarr)
-    if (!user.dolibarr_id) {
-      // Utilisateur LOCAL - validation requise
-      if (validPasswords[email] !== password) {
-        console.log("❌ Invalid password for local user");
-        return res.status(401).json({ error: "Mot de passe incorrect" });
+    // 4. Mot de passe : toujours vérifié — si le compte existe en démo locale, on valide contre validPasswords
+    //    même si Dolibarr a renvoyé un autre objet (email vide / espaces / autre clé).
+    const emailTrim = String(email || "").trim();
+    const emailLc = emailTrim.toLowerCase();
+    const seedUserForAuth = Object.values(users).find(
+      (u) =>
+        String(u.email || "").trim().toLowerCase() === emailLc ||
+        String(u.username || "").trim().toLowerCase() === emailLc,
+    );
+    const authEmailForPassword = seedUserForAuth
+      ? String(seedUserForAuth.email || "").trim()
+      : String(user.email || emailTrim).trim();
+
+    const resolvePasswordKey = () => {
+      const candidates = [
+        authEmailForPassword,
+        String(user.email || "").trim(),
+        emailTrim,
+      ].filter(Boolean);
+      const seen = new Set();
+      for (const c of candidates) {
+        if (seen.has(c)) continue;
+        seen.add(c);
+        if (validPasswords[c] !== undefined) return c;
+        const found = Object.keys(validPasswords).find(
+          (k) => k.toLowerCase() === String(c).toLowerCase(),
+        );
+        if (found) return found;
       }
-    } else {
-      // Utilisateur DOLIBARR - première connexion
-      if (!validPasswords[email] && password) {
-        // Première connexion: accepter le password et le stocker
-        validPasswords[email] = password;
-        console.log("✅ First login from Dolibarr user, password stored");
+      return null;
+    };
+
+    const pwdKey = resolvePasswordKey();
+    const expected = pwdKey != null ? validPasswords[pwdKey] : null;
+
+    const rawDol =
+      dolibarrLoginPayload && typeof dolibarrLoginPayload === "object"
+        ? dolibarrLoginPayload
+        : null;
+    const dolLoginStr = rawDol ? String(rawDol.login || "").trim() : "";
+    const dolEmailStr = rawDol ? String(rawDol.email || "").trim() : "";
+    const userEmailStr = String(user.email || "").trim();
+    // Dolibarr /login valide souvent le « login » interne plutôt que l’email affiché : le mettre en premier.
+    const dolLoginCandidates = [];
+    const pushCand = (s) => {
+      const v = String(s ?? "").trim();
+      if (v && !dolLoginCandidates.includes(v)) dolLoginCandidates.push(v);
+    };
+    pushCand(dolLoginStr);
+    pushCand(dolEmailStr);
+    pushCand(emailTrim);
+    pushCand(userEmailStr);
+
+    const mockPasswordOk = expected != null && expected === password;
+    const dolibarrPasswordOk =
+      dolibarrPasswordVerifiedEarly ||
+      (await verifyDolibarrWithLoginCandidates(dolLoginCandidates, password)) === true;
+
+    if (!mockPasswordOk && !dolibarrPasswordOk) {
+      console.log("❌ Mot de passe refusé (mock et Dolibarr)");
+      const hasApiKey = Boolean(String(DOLIBARR_API_KEY || "").trim());
+      if (expected == null && !hasApiKey) {
+        return res.status(401).json({
+          code: "INVALID_PASSWORD",
+          error:
+            "Ce compte n’est pas dans la liste démo du mock. Définissez DOLIBARR_API_KEY dans .env pour valider vos identifiants Dolibarr, ou utilisez un email démo (ex. john@company.com / password123).",
+        });
       }
+      return res.status(401).json({
+        code: "INVALID_PASSWORD",
+        error:
+          expected != null
+            ? "Le mot de passe est incorrect."
+            : "Identifiants Dolibarr incorrects, ou serveur Dolibarr injoignable.",
+      });
     }
 
-    // 5. Stocker le password pour les connexions futures (local users)
-    if (!user.dolibarr_id) {
-      validPasswords[email] = password;
+    if (dolibarrPasswordOk && !mockPasswordOk) {
+      console.log("✅ Mot de passe validé par l’API Dolibarr");
+    }
+
+    // Enregistrer le mot de passe pour ce compte (mock en mémoire) : prochains logins même si /login Dolibarr est capricieux.
+    if (mockPasswordOk || dolibarrPasswordOk) {
+      if (emailTrim) validPasswords[emailTrim] = password;
+      if (userEmailStr && userEmailStr !== emailTrim) validPasswords[userEmailStr] = password;
+      if (dolEmailStr && dolEmailStr !== emailTrim && dolEmailStr !== userEmailStr) {
+        validPasswords[dolEmailStr] = password;
+      }
     }
 
     await syncUserPaysFromDolibarrDatabase(user, dolibarrLoginPayload);
@@ -1212,6 +1592,7 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     console.log("✅ Login successful:", email, "Role:", user.role);
+    scheduleMockPersist();
 
     return res.json({
       token: `token_${user.id}_${user.role.toLowerCase()}`,
@@ -1228,7 +1609,11 @@ app.post("/api/auth/login", async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Erreur login:", error);
-    return res.status(500).json({ error: "Erreur serveur: " + error.message });
+    return res.status(500).json({
+      code: "INTERNAL_ERROR",
+      error: "Erreur serveur lors de la connexion. Réessayez plus tard.",
+      detail: String(error?.message || ""),
+    });
   }
 });
 
@@ -1476,8 +1861,10 @@ app.post("/api/demande", (req, res) => {
   const dureePermissionMinutes =
     ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR" ? 120 : null;
 
+  const nextDemandeId =
+    demandes.reduce((m, d) => Math.max(m, Number(d.id) || 0), 0) + 1;
   const newDemande = {
-    id: Math.max(...demandes.map((d) => d.id), 0) + 1,
+    id: nextDemandeId,
     userId: uid,
     typeConge,
     dateDebut,
@@ -1508,6 +1895,7 @@ app.post("/api/demande", (req, res) => {
   };
 
   demandes.push(newDemande);
+  saveMockPersistSync();
 
   return res.status(201).json({
     message: "Demande créée avec succès",
@@ -1562,10 +1950,39 @@ app.post("/api/demande/:id/manager-approve", (req, res) => {
   });
   demande.statut = "APPROUVE_MANAGER";
 
+  saveMockPersistSync();
   return res.json({ message: "Approuvé par le manager", demande });
 });
 
-app.post("/api/demande/:id/rh-approve", (req, res) => {
+function demandeDtoForEmail(demande) {
+  return {
+    id: demande.id,
+    type_conge: demande.typeConge,
+    date_debut: demande.dateDebut,
+    date_fin: demande.dateFin,
+    nombre_jours: demande.nombreJours ?? 0,
+  };
+}
+
+function queueEmployeeRhDecisionEmail(kind, demande, rejectReason) {
+  const employe = users[demande.userId];
+  if (!employe?.email) {
+    console.warn(
+      `📧 [email RH] ignoré: pas d'email pour l'employé userId=${demande.userId} (${employe?.fullName || "inconnu"})`,
+    );
+    return;
+  }
+  const dto = demandeDtoForEmail(demande);
+  const promise =
+    kind === "approve"
+      ? notificationService.notifyRHApproval(dto, employe)
+      : notificationService.notifyRejection(dto, employe, rejectReason || "");
+  promise.catch((err) =>
+    console.error("📧 [email décision RH]", err?.message || err),
+  );
+}
+
+function handleRhApprove(req, res) {
   const demande = demandes.find((d) => d.id === parseInt(req.params.id));
   const { userId, commentaire } = req.body;
   let approverId = userId;
@@ -1652,8 +2069,13 @@ app.post("/api/demande/:id/rh-approve", (req, res) => {
   // � NOTE: Synchronisation Dolibarr BD en attente des credentials corrects
   demande.dolibarr_sync = false;
 
+  queueEmployeeRhDecisionEmail("approve", demande);
+
+  saveMockPersistSync();
   return res.json({ message: "Approuvé par le RH ✅", demande });
-});
+}
+
+app.post("/api/demande/:id/rh-approve", handleRhApprove);
 
 // Annuler une demande
 app.post("/api/demande/:id/annuler", (req, res) => {
@@ -1689,11 +2111,12 @@ app.post("/api/demande/:id/annuler", (req, res) => {
     user_id: demande.userId,
   });
 
+  saveMockPersistSync();
   return res.json({ message: "Demande annulée", demande });
 });
 
 // Rejeter une demande
-app.post("/api/demande/:id/reject", (req, res) => {
+function handleRhReject(req, res) {
   const demande = demandes.find((d) => d.id === parseInt(req.params.id));
   const { commentaire } = req.body;
 
@@ -1706,8 +2129,13 @@ app.post("/api/demande/:id/reject", (req, res) => {
     commentaire: commentaire || "",
   });
 
+  queueEmployeeRhDecisionEmail("reject", demande, commentaire);
+
+  saveMockPersistSync();
   return res.json({ message: "Demande rejetée", demande });
-});
+}
+
+app.post("/api/demande/:id/reject", handleRhReject);
 
 // ============================================
 // TABLEAU DE BORD RH
@@ -1837,6 +2265,88 @@ app.get("/api/rh/stats", (req, res) => {
   });
 });
 
+/** Alias /api/hr/* : le frontend (DecisionModule, rhApi) appelle ces chemins en premier. */
+app.get("/api/hr/requests/stats", (req, res) => {
+  const rows = demandes.map(toRhRequestDto);
+  const stats = {
+    pending: rows.filter((r) => r.statut === "PENDING").length,
+    approved: rows.filter((r) => r.statut === "APPROVED").length,
+    rejected: rows.filter((r) => r.statut === "REJECTED").length,
+  };
+  return res.json({
+    ...stats,
+    total: stats.pending + stats.approved + stats.rejected,
+  });
+});
+
+app.get("/api/hr/requests/pending", (req, res) => {
+  const { employee, country, department, startDate, endDate } = req.query;
+  const pendingSource = demandes.filter(
+    (d) => d.statut === "EN_ATTENTE" || d.statut === "APPROUVE_MANAGER",
+  );
+  let rows = pendingSource.map(toRhRequestDto);
+  if (employee) {
+    const q = String(employee).toLowerCase();
+    rows = rows.filter((r) =>
+      `${r.employe?.prenom || ""} ${r.employe?.nom || ""} ${r.employe?.email || ""}`
+        .toLowerCase()
+        .includes(q),
+    );
+  }
+  if (country) {
+    rows = rows.filter(
+      (r) =>
+        String(r.employe?.country || "").toUpperCase() ===
+        String(country).toUpperCase(),
+    );
+  }
+  if (department) {
+    rows = rows.filter(
+      (r) =>
+        String(r.employe?.department || "").toLowerCase() ===
+        String(department).toLowerCase(),
+    );
+  }
+  if (startDate) {
+    rows = rows.filter((r) => String(r.dateDebut) >= String(startDate));
+  }
+  if (endDate) {
+    rows = rows.filter((r) => String(r.dateFin) <= String(endDate));
+  }
+  return res.json(rows);
+});
+
+app.post("/api/hr/requests/:id/decision", (req, res) => {
+  const action = String(req.body?.action ?? "").toUpperCase();
+  const comment = req.body?.comment ?? "";
+  const id = req.params.id;
+  const token = req.headers.authorization?.split(" ")[1] || "";
+  const tokenParts = token.split("_");
+  const tokenUserId = Number(tokenParts[1]);
+  if (action === "REJECT" || action === "REJECTED") {
+    return handleRhReject(
+      { params: { id }, body: { commentaire: comment } },
+      res,
+    );
+  }
+  if (action === "APPROVE" || action === "APPROVED") {
+    return handleRhApprove(
+      {
+        params: { id },
+        body: {
+          userId: Number.isFinite(tokenUserId) ? tokenUserId : req.body?.userId,
+          commentaire: comment,
+        },
+        headers: req.headers,
+      },
+      res,
+    );
+  }
+  return res
+    .status(400)
+    .json({ error: "Action invalide (APPROVE ou REJECT attendu)." });
+});
+
 app.get("/api/calendar/events", (req, res) => {
   const { employeeId, department, country, startDate, endDate } = req.query;
   const events = [];
@@ -1920,6 +2430,7 @@ app.post("/api/hr-config/workflow-rules", (req, res) => {
     steps: payload.steps || [],
   };
   workflowRules.push(next);
+  scheduleMockPersist();
   return res.status(201).json(next);
 });
 
@@ -1983,6 +2494,7 @@ app.put("/api/hr-config/work-schedules", (req, res) => {
     }));
   }
 
+  scheduleMockPersist();
   return res.json({
     countryCode: country,
     scheduleType: type,
@@ -2029,6 +2541,7 @@ app.post("/api/hr-config/exceptional-leaves", (req, res) => {
     enabled: Boolean(payload.enabled ?? true),
   };
   exceptionalLeavesByCountry[country].push(next);
+  scheduleMockPersist();
   return res.status(201).json({
     id: next.id,
     countryCode: country,
@@ -2073,6 +2586,7 @@ app.put("/api/hr-config/exceptional-leaves/:id", (req, res) => {
   exceptionalLeavesByCountry[currentCountry].splice(currentIndex, 1);
   exceptionalLeavesByCountry[country].push(updated);
 
+  scheduleMockPersist();
   return res.json({
     id: updated.id,
     countryCode: country,
@@ -2098,8 +2612,10 @@ app.post("/api/hr-config/public-holidays/import", async (req, res) => {
   const year = Number(req.query.year || req.body?.year || new Date().getFullYear());
   try {
     const result = await importOfficialPublicHolidaysForCountry(country, year);
+    scheduleMockPersist();
     return res.json({ success: true, ...result });
   } catch (e) {
+    scheduleMockPersist();
     return res.json({
       success: true,
       imported: 0,
@@ -2128,6 +2644,7 @@ app.post("/api/hr-config/public-holidays/import-all", async (req, res) => {
   }
 
   const totalImported = results.reduce((sum, r) => sum + (Number(r.imported) || 0), 0);
+  scheduleMockPersist();
   return res.json({
     success: true,
     year,
@@ -2155,6 +2672,7 @@ app.post("/api/hr-config/public-holidays", (req, res) => {
   );
   if (existing) {
     existing.active = true;
+    scheduleMockPersist();
     return res.json(existing);
   }
 
@@ -2167,6 +2685,7 @@ app.post("/api/hr-config/public-holidays", (req, res) => {
     source: "manual",
   };
   publicHolidaysStore[country].push(created);
+  scheduleMockPersist();
   return res.status(201).json(created);
 });
 
@@ -2181,6 +2700,7 @@ app.put("/api/hr-config/public-holidays/:id/apply", (req, res) => {
     const row = rows.find((h) => h.id === id);
     if (row) {
       row.active = applied;
+      scheduleMockPersist();
       return res.json(row);
     }
   }
@@ -2193,6 +2713,7 @@ app.delete("/api/hr-config/public-holidays/:id", (req, res) => {
     const idx = rows.findIndex((h) => h.id === id);
     if (idx !== -1) {
       rows.splice(idx, 1);
+      scheduleMockPersist();
       return res.json({ success: true, deletedId: id, countryCode });
     }
   }
@@ -2345,11 +2866,26 @@ app.listen(PORT, () => {
   console.log(`  🎯 Backend API - Gestion des Congés`);
   console.log(`${"=".repeat(55)}`);
   console.log(`\n✅ Serveur lancé sur: http://localhost:${PORT}`);
+  const envPath = path.join(__dirname, ".env");
+  if (notificationService.isSmtpConfigured()) {
+    console.log(`  📧 SMTP: configuré (envoi réel) — .env: ${envPath}`);
+  } else {
+    console.log(`  📧 SMTP: non configuré → emails RH uniquement journal console`);
+    console.log(`      → place MAIL_USERNAME + MAIL_PASSWORD dans: ${envPath}`);
+  }
+  if (!mockPersistDisabled()) {
+    console.log(
+      `  💾 Persistance mock: ${getMockPersistPath()} (supprimez le fichier pour repartir des données d’exemple)`,
+    );
+  } else {
+    console.log(`  💾 Persistance mock: désactivée (MOCK_PERSIST_DISABLE)`);
+  }
   bootstrapPublicHolidaysOnStartup()
     .then((years) => {
       console.log(
         `  ✓ Jours fériés officiels (TN, FR, MA) — synchronisation auto années ${years[0]}–${years[years.length - 1]}`,
       );
+      scheduleMockPersist();
     })
     .catch((err) => {
       console.warn(`  ⚠ Synchronisation jours fériés (démarrage): ${err?.message || err}`);
@@ -2380,6 +2916,9 @@ app.listen(PORT, () => {
   console.log(`  • POST   /api/demande/:id/rh-approve`);
   console.log(`  • GET    /api/rh/dashboard`);
   console.log(`  • GET    /api/rh/demandes-en-attente`);
+  console.log(`  • GET    /api/hr/requests/pending`);
+  console.log(`  • POST   /api/hr/requests/:id/decision`);
+  console.log(`  • GET    /api/hr/requests/stats`);
   console.log(`  • GET    /api/demande/:id/pdf`);
   console.log(`  • GET    /api/dolibarr/config`);
   console.log(`\n${"=".repeat(55)}\n`);

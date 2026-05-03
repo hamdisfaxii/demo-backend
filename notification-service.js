@@ -6,19 +6,61 @@
 const nodemailer = require("nodemailer");
 const moment = require("moment");
 
+function smtpUser() {
+  const u = process.env.EMAIL_USER || process.env.MAIL_USERNAME || "";
+  return String(u).trim();
+}
+
+function smtpPass() {
+  const p = process.env.EMAIL_PASSWORD || process.env.MAIL_PASSWORD || "";
+  return String(p).trim();
+}
+
+function isPlaceholderMailConfig() {
+  const u = smtpUser();
+  const p = smtpPass();
+  if (!u || !p) return true;
+  if (u === "votre-email@gmail.com" || u === "your-email@gmail.com") return true;
+  if (p === "votre-password" || p === "your-app-password") return true;
+  return false;
+}
+
+function createSmtpTransporter() {
+  const user = smtpUser();
+  const pass = smtpPass();
+  const host = String(process.env.MAIL_HOST || process.env.SMTP_HOST || "").trim();
+  if (host) {
+    const port = Number(process.env.MAIL_PORT || 587);
+    return nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
+    });
+  }
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: { user, pass },
+  });
+}
+
+function mailFromAddress() {
+  return String(
+    process.env.MAIL_FROM_EMAIL ||
+      process.env.APP_NOTIFICATION_FROM_EMAIL ||
+      smtpUser() ||
+      "",
+  ).trim();
+}
+
 class NotificationService {
   constructor() {
-    // Configuration email (à adapter avec vos credentials)
-    this.transporter = nodemailer.createTransport({
-      service: "gmail", // Ou autre service
-      auth: {
-        user: process.env.EMAIL_USER || "votre-email@gmail.com",
-        pass: process.env.EMAIL_PASSWORD || "votre-password",
-      },
-    });
-
-    // Log en mémoire des notifications (fallback)
     this.notificationLog = [];
+  }
+
+  /** True si MAIL_* / EMAIL_* permettent un envoi réel (hors placeholders). */
+  isSmtpConfigured() {
+    return !isPlaceholderMailConfig();
   }
 
   /**
@@ -177,11 +219,8 @@ class NotificationService {
    */
   async _sendEmail(to, subject, htmlContent, metadata = {}) {
     try {
-      // Si email non configuré, log seulement
-      if (
-        !process.env.EMAIL_USER ||
-        process.env.EMAIL_USER === "votre-email@gmail.com"
-      ) {
+      // Si SMTP non configuré, log seulement (même variables que Spring : MAIL_USERNAME, etc.)
+      if (isPlaceholderMailConfig()) {
         const notification = {
           id: `notif_${Date.now()}`,
           to,
@@ -199,9 +238,10 @@ class NotificationService {
         return notification;
       }
 
-      // Sinon, envoyer vraiment
-      const info = await this.transporter.sendMail({
-        from: process.env.EMAIL_USER,
+      const transport = createSmtpTransporter();
+      const fromAddr = mailFromAddress() || smtpUser();
+      const info = await transport.sendMail({
+        from: fromAddr,
         to,
         subject,
         html: htmlContent,

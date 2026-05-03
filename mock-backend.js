@@ -18,6 +18,7 @@ const express = require("express");
 const cors = require("cors");
 const fetch = require("node-fetch");
 const mysql = require("mysql2/promise");
+const Holidays = require("date-holidays");
 require("dotenv").config();
 const app = express();
 const PORT = Number(process.env.SERVER_PORT || 8080);
@@ -567,6 +568,124 @@ const publicHolidaysStore = Object.entries(joursFeriesPays).reduce(
   {},
 );
 
+/** Pays pour lesquels on peut pré-remplir les jours fériés officiels (RH). */
+const HR_PUBLIC_HOLIDAY_COUNTRIES = ["TN", "FR", "MA"];
+
+function mergePublicHolidayRows(country, rows, source = "internet") {
+  const cc = String(country || "TN").toUpperCase();
+  if (!publicHolidaysStore[cc]) {
+    publicHolidaysStore[cc] = [];
+  }
+  let imported = 0;
+  (rows || []).forEach((item) => {
+    const dateJour = String(item.dateJour || "").trim();
+    const libelle = String(item.libelle || "").trim();
+    if (!dateJour || !libelle) return;
+
+    const existing = publicHolidaysStore[cc].find(
+      (h) => h.dateJour === dateJour && h.libelle.toLowerCase() === libelle.toLowerCase(),
+    );
+
+    if (!existing) {
+      publicHolidaysStore[cc].push({
+        id: publicHolidaySeq++,
+        countryCode: cc,
+        libelle,
+        dateJour,
+        active: true,
+        source,
+      });
+      imported += 1;
+    } else {
+      existing.active = true;
+    }
+  });
+  return imported;
+}
+
+function fetchLocalLibPublicHolidays(year, country) {
+  const cc = String(country || "TN").toUpperCase();
+  const y = Number(year);
+  try {
+    const hd = new Holidays(cc);
+    const list = hd.getHolidays(y);
+    if (!Array.isArray(list)) return [];
+    return list
+      .map((h) => {
+        const d = h.start instanceof Date ? h.start : h.date;
+        if (!d || Number.isNaN(d.getTime())) return null;
+        const yy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        const libelle = String(h.name || "").trim();
+        if (!libelle) return null;
+        return { dateJour: `${yy}-${mm}-${dd}`, libelle };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function importOfficialPublicHolidaysForCountry(country, year) {
+  const cc = String(country || "TN").toUpperCase();
+  const y = Number(year);
+  if (!publicHolidaysStore[cc]) {
+    publicHolidaysStore[cc] = [];
+  }
+
+  let nagerRows = null;
+  try {
+    const response = await fetch(`https://date.nager.at/api/v3/PublicHolidays/${y}/${cc}`);
+    if (response.ok) {
+      const apiRows = await response.json();
+      if (Array.isArray(apiRows) && apiRows.length > 0) {
+        nagerRows = apiRows.map((row) => ({
+          dateJour: String(row.date || ""),
+          libelle: String(row.localName || row.name || "").trim(),
+        }));
+      }
+    }
+  } catch {
+    /* fallback local */
+  }
+
+  if (nagerRows && nagerRows.length > 0) {
+    const imported = mergePublicHolidayRows(cc, nagerRows, "internet");
+    return { imported, country: cc, year: y };
+  }
+
+  const localRows = fetchLocalLibPublicHolidays(y, cc);
+  if (localRows.length > 0) {
+    const imported = mergePublicHolidayRows(cc, localRows, "local-lib");
+    return {
+      imported,
+      country: cc,
+      year: y,
+      note: "Source locale (date-holidays)",
+    };
+  }
+
+  return {
+    imported: 0,
+    country: cc,
+    year: y,
+    warning: "Source internet et locale indisponibles pour ce pays/année.",
+  };
+}
+
+/** Au démarrage du serveur : remplit TN/FR/MA pour année-1, année, année+1 (Nager puis date-holidays). */
+async function bootstrapPublicHolidaysOnStartup() {
+  const y = new Date().getFullYear();
+  const years = [y - 1, y, y + 1];
+  for (const year of years) {
+    for (const cc of HR_PUBLIC_HOLIDAY_COUNTRIES) {
+      await importOfficialPublicHolidaysForCountry(cc, year);
+    }
+  }
+  return years;
+}
+
 // Soldes de congés
 const kongesSoldes = {
   1: {
@@ -1079,6 +1198,14 @@ const buildSoldeResponse = (userId) => {
     soldePermission: soldeCourteDuree,
     soldeMaladie,
     maladieNonDecompte,
+    /** Texte métier lisible côté UI (maladie hors quota lorsque jours = 0). */
+    messageMaladie:
+      maladieNonDecompte
+        ? "Congé maladie défini hors quota : il ne diminue ni vos congés payés ni vos permissions courte durée (RTT)."
+        : null,
+    /** Rappel : le champ « solde » n’agrège pas parental / quotas séparés. */
+    hintCongesPayes:
+      "Astuce : le solde principal correspond aux congés payés uniquement. Les autres types ont leur carte ou ligne de détail.",
     details,
     soldes: details,
     reste: soldeCongesPayes,
@@ -1477,37 +1604,51 @@ app.get("/api/rh/stats", (req, res) => {
 app.get("/api/calendar/events", (req, res) => {
   const { employeeId, department, country, startDate, endDate } = req.query;
   const events = [];
+  /** Vue « mon calendrier » : l’employé voit aussi ses demandes en attente. */
+  const employeeSelfView =
+    employeeId != null && String(employeeId).trim() !== "";
 
-  demandes
-    .filter((d) => normalizeStatusForApi(d.statut) === "APPROVED")
-    .forEach((d) => {
-      const employe = users[d.userId] || {};
-      const byEmployee = !employeeId || String(d.userId) === String(employeeId);
-      const byDepartment =
-        !department ||
-        String(employe.departement || "").toLowerCase() ===
-          String(department).toLowerCase();
-      const byCountry =
-        !country ||
-        String(employe.pays || "").toUpperCase() === String(country).toUpperCase();
-      const byStart = !startDate || String(d.dateDebut) >= String(startDate);
-      const byEnd = !endDate || String(d.dateFin) <= String(endDate);
+  demandes.forEach((d) => {
+    const employe = users[d.userId] || {};
+    const status = normalizeStatusForApi(d.statut);
 
-      if (byEmployee && byDepartment && byCountry && byStart && byEnd) {
-        events.push({
-          eventType: "APPROVED_LEAVE",
-          demandeId: d.id,
-          userId: d.userId,
-          employeeName: employe.fullName || "",
-          department: employe.departement || "",
-          country: employe.pays || "",
-          leaveType: d.typeConge,
-          title: `${employe.fullName || "Employé"} - ${d.typeConge}`,
-          startDate: d.dateDebut,
-          endDate: d.dateFin,
-        });
-      }
+    const byEmployee = !employeeId || String(d.userId) === String(employeeId);
+    const byDepartment =
+      !department ||
+      String(employe.departement || "").toLowerCase() ===
+        String(department).toLowerCase();
+    const byCountry =
+      !country ||
+      String(employe.pays || "").toUpperCase() === String(country).toUpperCase();
+    const overlapsPeriod =
+      (!endDate || String(d.dateDebut) <= String(endDate)) &&
+      (!startDate || String(d.dateFin) >= String(startDate));
+
+    if (!(byEmployee && byDepartment && byCountry && overlapsPeriod)) {
+      return;
+    }
+
+    let include = status === "APPROVED";
+    if (employeeSelfView && String(d.userId) === String(employeeId)) {
+      include = status === "APPROVED" || status === "PENDING";
+    }
+    if (!include) return;
+
+    const isApproved = status === "APPROVED";
+    events.push({
+      eventType: isApproved ? "APPROVED_LEAVE" : "MY_LEAVE_PENDING",
+      demandeId: d.id,
+      userId: d.userId,
+      workflowStatus: status,
+      employeeName: employe.fullName || "",
+      department: employe.departement || "",
+      country: employe.pays || "",
+      leaveType: d.typeConge,
+      title: `${employe.fullName || "Employé"} — ${d.typeConge}${isApproved ? "" : " (en attente)"}`,
+      startDate: d.dateDebut,
+      endDate: d.dateFin,
     });
+  });
 
   const start = String(startDate || "");
   const end = String(endDate || "");
@@ -1719,48 +1860,9 @@ app.get("/api/hr-config/public-holidays", (req, res) => {
 app.post("/api/hr-config/public-holidays/import", async (req, res) => {
   const country = String(req.query.country || req.body?.country || "TN").toUpperCase();
   const year = Number(req.query.year || req.body?.year || new Date().getFullYear());
-  if (!publicHolidaysStore[country]) {
-    publicHolidaysStore[country] = [];
-  }
-
   try {
-    const response = await fetch(`https://date.nager.at/api/v3/PublicHolidays/${year}/${country}`);
-    if (!response.ok) {
-      return res.json({
-        success: true,
-        imported: 0,
-        country,
-        year,
-        warning: `Source internet indisponible (${response.status}), conservation des données existantes.`,
-      });
-    }
-    const apiRows = await response.json();
-    let imported = 0;
-    apiRows.forEach((row) => {
-      const dateJour = String(row.date || "");
-      const libelle = String(row.localName || row.name || "").trim();
-      if (!dateJour || !libelle) return;
-
-      const existing = publicHolidaysStore[country].find(
-        (h) => h.dateJour === dateJour && h.libelle.toLowerCase() === libelle.toLowerCase(),
-      );
-
-      if (!existing) {
-        publicHolidaysStore[country].push({
-          id: publicHolidaySeq++,
-          countryCode: country,
-          libelle,
-          dateJour,
-          active: true,
-          source: "internet",
-        });
-        imported += 1;
-      } else {
-        existing.active = true;
-      }
-    });
-
-    return res.json({ success: true, imported, country, year });
+    const result = await importOfficialPublicHolidaysForCountry(country, year);
+    return res.json({ success: true, ...result });
   } catch (e) {
     return res.json({
       success: true,
@@ -1770,6 +1872,33 @@ app.post("/api/hr-config/public-holidays/import", async (req, res) => {
       warning: e.message || "Source internet indisponible, conservation des données existantes.",
     });
   }
+});
+
+app.post("/api/hr-config/public-holidays/import-all", async (req, res) => {
+  const year = Number(req.query.year || req.body?.year || new Date().getFullYear());
+  const raw = req.query.countries ?? req.body?.countries;
+  let countries = [...HR_PUBLIC_HOLIDAY_COUNTRIES];
+  if (raw != null && String(raw).trim() !== "") {
+    countries = String(raw)
+      .split(",")
+      .map((c) => c.trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  const results = [];
+  for (const cc of countries) {
+    const result = await importOfficialPublicHolidaysForCountry(cc, year);
+    results.push(result);
+  }
+
+  const totalImported = results.reduce((sum, r) => sum + (Number(r.imported) || 0), 0);
+  return res.json({
+    success: true,
+    year,
+    countries,
+    results,
+    totalImported,
+  });
 });
 
 app.post("/api/hr-config/public-holidays", (req, res) => {
@@ -1980,6 +2109,15 @@ app.listen(PORT, () => {
   console.log(`  🎯 Backend API - Gestion des Congés`);
   console.log(`${"=".repeat(55)}`);
   console.log(`\n✅ Serveur lancé sur: http://localhost:${PORT}`);
+  bootstrapPublicHolidaysOnStartup()
+    .then((years) => {
+      console.log(
+        `  ✓ Jours fériés officiels (TN, FR, MA) — synchronisation auto années ${years[0]}–${years[years.length - 1]}`,
+      );
+    })
+    .catch((err) => {
+      console.warn(`  ⚠ Synchronisation jours fériés (démarrage): ${err?.message || err}`);
+    });
   console.log(`\n📚 Fonctionnalités implémentées:`);
   console.log(`  ✓ Gestion des demandes de congés`);
   console.log(`  ✓ Workflow multi-niveaux (Manager → RH → DRH)`);

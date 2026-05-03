@@ -140,6 +140,13 @@ public class HrConfigController {
         ));
     }
 
+    @PostMapping("/public-holidays/import-all")
+    public ResponseEntity<Map<String, Object>> importPublicHolidaysAll(
+            @RequestParam(name = "year", required = false) Integer year
+    ) {
+        return ResponseEntity.ok(hrHolidayService.importPublicHolidaysAllCountries(year));
+    }
+
     @PostMapping("/public-holidays")
     public ResponseEntity<Holiday> createPublicHoliday(
             @AuthenticationPrincipal UserEntity user,

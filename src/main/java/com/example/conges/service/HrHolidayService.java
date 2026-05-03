@@ -5,6 +5,7 @@ import com.example.conges.repository.HolidayRepository;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.MonthDay;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -19,6 +20,7 @@ import org.springframework.web.client.RestTemplate;
 @RequiredArgsConstructor
 public class HrHolidayService {
 
+    private static final List<String> HR_PUBLIC_HOLIDAY_COUNTRIES = List.of("TN", "FR", "MA");
     private static final long SYNTHETIC_PREFIX = 9_000_000_000L;
     private final HolidayRepository holidayRepository;
     private final RestTemplate restTemplate = new RestTemplate();
@@ -58,6 +60,30 @@ public class HrHolidayService {
             // Fallback robuste pour éviter de bloquer l'action RH quand la source externe échoue.
             return importFallbackPublicHolidays(normalizedCountry, targetYear);
         }
+    }
+
+    /**
+     * Importe les jours fériés officiels pour TN, FR et MA (une passe par pays).
+     */
+    @Transactional
+    public Map<String, Object> importPublicHolidaysAllCountries(Integer year) {
+        int targetYear = year == null ? LocalDate.now().getYear() : year;
+        int totalImported = 0;
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (String cc : HR_PUBLIC_HOLIDAY_COUNTRIES) {
+            int imported = importPublicHolidays(cc, targetYear);
+            totalImported += imported;
+            results.add(Map.of(
+                    "country", cc,
+                    "imported", imported,
+                    "year", targetYear));
+        }
+        return Map.of(
+                "success", true,
+                "year", targetYear,
+                "countries", HR_PUBLIC_HOLIDAY_COUNTRIES,
+                "results", results,
+                "totalImported", totalImported);
     }
 
     @Transactional

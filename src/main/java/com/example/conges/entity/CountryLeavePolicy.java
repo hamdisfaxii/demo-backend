@@ -33,4 +33,16 @@ public class CountryLeavePolicy {
 
     @Column(nullable = false)
     private Integer annualQuota;
+
+    /** Si renseigné : plafond annuel PAYE via mois × taux ; sinon ancien mode annual_quota seul. */
+    @Column(name = "monthly_accrual_rate")
+    private Double monthlyAccrualRate;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private boolean rttEnabled = false;
+
+    /** Quota RTT annuel (France) lorsque {@link TypeConge#COURTE_DUREE}. */
+    @Column(name = "rtt_annual_days")
+    private Integer rttAnnualDays;
 }

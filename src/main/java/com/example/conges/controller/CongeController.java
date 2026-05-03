@@ -2,7 +2,6 @@ package com.example.conges.controller;
 
 import com.example.conges.dto.DemandeCongeRequest;
 import com.example.conges.dto.DemandeCongeResponse;
-import com.example.conges.dto.SoldeCongeResponse;
 import com.example.conges.entity.Role;
 import com.example.conges.entity.UserEntity;
 import com.example.conges.service.CongeService;
@@ -37,23 +36,14 @@ public class CongeController {
 
     /**
      * GET /api/conge/solde
-     * Retourne le solde de l'utilisateur actuellement connecté.
-     * Le frontend s'attend à un nombre simple, pas une liste.
+     * Soldes métier enrichis ({@code soldeCongesPayes}, RTT, maladie, etc.) plus {@code solde} (= CP uniquement).
      */
     @GetMapping("/solde")
     public ResponseEntity<Map<String, Object>> getSolde(@AuthenticationPrincipal UserEntity user) {
-        List<SoldeCongeResponse> soldes = congeService.calculerSolde(user.getId());
-        
-        // Calcule le total des jours restants pour tous les types
-        int totalJoursRestants = soldes.stream()
-                .mapToInt(SoldeCongeResponse::getJoursRestants)
-                .sum();
-        
-        Map<String, Object> response = new HashMap<>();
-        response.put("solde", totalJoursRestants);
-        response.put("details", soldes);
-        
-        return ResponseEntity.ok(response);
+        if (user == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+        return ResponseEntity.ok(congeService.getSoldeResponseMap(user.getId()));
     }
 
     /**
@@ -75,11 +65,8 @@ public class CongeController {
         if (isRh) {
             demandes = congeService.getAllDemandesEnAttente();
         } else {
-            demandes = congeService.getMesDemandes(user.getId());
+            demandes = congeService.getMesDemandesFiltrees(user.getId(), annee, statut);
         }
-        
-        // Filtre par annee et statut si fournis
-        // (Le frontend envoie des filtres, mais la logique de filtrage peut être améliorée)
         
         Map<String, Object> response = new HashMap<>();
         response.put("demandes", demandes);
@@ -93,13 +80,19 @@ public class CongeController {
      * Retourne le détail d'une demande par son ID.
      */
     @GetMapping("/{id}")
-    public ResponseEntity<DemandeCongeResponse> getDemandeById(@PathVariable Long id) {
-        List<DemandeCongeResponse> demandes = congeService.getAllDemandesEnAttente();
-        return demandes.stream()
-                .filter(d -> d.getId().equals(id))
-                .findFirst()
-                .map(ResponseEntity::ok)
-                .orElseGet(() -> ResponseEntity.notFound().build());
+    public ResponseEntity<DemandeCongeResponse> getDemandeById(
+            @PathVariable Long id,
+            @AuthenticationPrincipal UserEntity user) {
+        if (user == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+        try {
+            return ResponseEntity.ok(congeService.getDemandeById(id, user.getId(), user.getRole()));
+        } catch (javax.persistence.EntityNotFoundException ex) {
+            return ResponseEntity.notFound().build();
+        } catch (org.springframework.security.access.AccessDeniedException ex) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
     }
 
     /**

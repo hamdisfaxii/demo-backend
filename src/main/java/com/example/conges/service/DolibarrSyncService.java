@@ -245,9 +245,12 @@ public class DolibarrSyncService {
             if (existing.isPresent()) {
                 // Mise à jour
                 EmployeeLeaveAllocation alloc = existing.get();
-                alloc.setJoursInitiaux(allocation.getJoursInitiaux());
-                alloc.setJoursUtilises(allocation.getJoursUtilises());
-                alloc.setJoursDisponibles(allocation.getJoursDisponibles());
+                double eff = allocation.resolveEffectiveQtyAvailable();
+                Double ini = allocation.getJoursInitiaux() != null ? allocation.getJoursInitiaux() : eff;
+                Double uti = allocation.getJoursUtilises() != null ? allocation.getJoursUtilises() : 0D;
+                alloc.setJoursInitiaux(ini);
+                alloc.setJoursUtilises(uti);
+                alloc.setJoursDisponibles(eff);
                 alloc.setDateDebut(allocation.getDateDebut());
                 alloc.setDateFin(allocation.getDateFin());
                 alloc.setActive(allocation.isActive());
@@ -259,13 +262,18 @@ public class DolibarrSyncService {
                         employee.get().getPrenom(), leaveType.get().getCode());
             } else {
                 // Création
+                double effCreate = allocation.resolveEffectiveQtyAvailable();
+                Double iniCreate =
+                        allocation.getJoursInitiaux() != null ? allocation.getJoursInitiaux() : effCreate;
+                Double utiCreate =
+                        allocation.getJoursUtilises() != null ? allocation.getJoursUtilises() : 0D;
                 EmployeeLeaveAllocation newAllocation = EmployeeLeaveAllocation.builder()
                         .employee(employee.get())
                         .leaveType(leaveType.get())
                         .dolibarrAllocationId(allocation.getId())
-                        .joursInitiaux(allocation.getJoursInitiaux())
-                        .joursUtilises(allocation.getJoursUtilises())
-                        .joursDisponibles(allocation.getJoursDisponibles())
+                        .joursInitiaux(iniCreate)
+                        .joursUtilises(utiCreate)
+                        .joursDisponibles(effCreate)
                         .annee(allocation.getAnnee())
                         .dateDebut(allocation.getDateDebut())
                         .dateFin(allocation.getDateFin())

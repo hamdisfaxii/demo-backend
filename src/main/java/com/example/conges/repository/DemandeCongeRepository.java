@@ -3,6 +3,7 @@ package com.example.conges.repository;
 import com.example.conges.entity.DemandeConge;
 import com.example.conges.entity.StatutConge;
 import com.example.conges.entity.WorkflowStepType;
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.Collection;
 import java.util.List;
@@ -34,6 +35,17 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
             @Param("userId") Long userId,
             @Param("statuts") Collection<StatutConge> statuts
     );
+
+    /** Année civile basée sur la date de début (alignée sur le calcul métier FR RTT courant). */
+    @Query(
+            value = "SELECT COALESCE(SUM(d.nombre_jours), 0) FROM demandes_conge d "
+                    + "WHERE d.user_id = :userId AND d.type_conge = 'COURTE_DUREE' AND d.statut = :statut "
+                    + "AND YEAR(d.date_debut) = :year",
+            nativeQuery = true)
+    BigDecimal sumJoursCourteDurePourAnneeEtStatut(
+            @Param("userId") Long userId,
+            @Param("statut") String statut,
+            @Param("year") int year);
 
     long countByStatut(StatutConge statut);
     long countByStatutAndUser_PaysIgnoreCase(StatutConge statut, String pays);
@@ -131,4 +143,78 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
             @Param("startDate") LocalDate startDate,
             @Param("endDate") LocalDate endDate
     );
+
+    @Query("""
+            SELECT DISTINCT d
+            FROM DemandeConge d
+            JOIN FETCH d.user u
+            WHERE (:statut IS NULL OR d.statut = :statut)
+              AND (:employee IS NULL OR LOWER(CONCAT(COALESCE(u.prenom, ''), ' ', COALESCE(u.nom, ''), ' ', COALESCE(u.email, ''))) LIKE LOWER(CONCAT('%', :employee, '%')))
+              AND (:country IS NULL OR UPPER(u.pays) = UPPER(:country))
+              AND (:department IS NULL OR LOWER(u.departement) = LOWER(:department))
+              AND (:startDate IS NULL OR d.dateDebut >= :startDate)
+              AND (:endDate IS NULL OR d.dateFin <= :endDate)
+            ORDER BY d.dateSoumission DESC
+            """)
+    List<DemandeConge> findHistoryForHrPanel(
+            @Param("statut") StatutConge statut,
+            @Param("employee") String employee,
+            @Param("country") String country,
+            @Param("department") String department,
+            @Param("startDate") LocalDate startDate,
+            @Param("endDate") LocalDate endDate
+    );
+
+    @Query("""
+            SELECT COUNT(d)
+            FROM DemandeConge d
+            WHERE d.user.id = :userId
+              AND d.typeConge = com.example.conges.entity.TypeConge.COURTE_DUREE
+              AND d.statut = :statut
+              AND d.dureePermissionMinutes IS NOT NULL
+              AND d.dureePermissionMinutes > 0
+              AND d.dateDebut >= :startInclusive
+              AND d.dateDebut <= :endInclusive
+            """)
+    long countShortHourlyLeavesInMonthForStatus(
+            @Param("userId") Long userId,
+            @Param("statut") StatutConge statut,
+            @Param("startInclusive") LocalDate startInclusive,
+            @Param("endInclusive") LocalDate endInclusive);
+
+    @Query("""
+            SELECT COUNT(d)
+            FROM DemandeConge d
+            WHERE d.user.id = :userId
+              AND d.typeConge = com.example.conges.entity.TypeConge.COURTE_DUREE
+              AND d.statut IN :statuts
+              AND d.dureePermissionMinutes IS NOT NULL
+              AND d.dureePermissionMinutes > 0
+              AND d.dateDebut >= :startInclusive
+              AND d.dateDebut <= :endInclusive
+            """)
+    long countShortHourlyLeavesInMonthForStatuses(
+            @Param("userId") Long userId,
+            @Param("statuts") Collection<StatutConge> statuts,
+            @Param("startInclusive") LocalDate startInclusive,
+            @Param("endInclusive") LocalDate endInclusive);
+
+    @Query("""
+            SELECT COUNT(d)
+            FROM DemandeConge d
+            WHERE d.user.id = :userId
+              AND d.typeConge = com.example.conges.entity.TypeConge.COURTE_DUREE
+              AND d.statut = :statut
+              AND d.dureePermissionMinutes IS NOT NULL
+              AND d.dureePermissionMinutes > 0
+              AND d.dateDebut >= :startInclusive
+              AND d.dateDebut <= :endInclusive
+              AND (:excludeDemandeId IS NULL OR d.id <> :excludeDemandeId)
+            """)
+    long countAcceptedNonFranceHourlyShortLeavesInMonth(
+            @Param("userId") Long userId,
+            @Param("statut") StatutConge statut,
+            @Param("startInclusive") LocalDate startInclusive,
+            @Param("endInclusive") LocalDate endInclusive,
+            @Param("excludeDemandeId") Long excludeDemandeId);
 }

@@ -35,6 +35,7 @@ public class WorkflowService {
     private final WorkflowStepRepository workflowStepRepository;
     private final DemandeApprovalRepository demandeApprovalRepository;
     private final DemandeCongeRepository demandeCongeRepository;
+    private final HourlyLeaveCapEvaluator hourlyLeaveCapEvaluator;
 
     @Transactional
     public void initializeWorkflow(DemandeConge demande) {
@@ -98,6 +99,7 @@ public class WorkflowService {
                 .orElse(null);
 
         if (nextStep == null) {
+            hourlyLeaveCapEvaluator.assertMonthlyCapOnAccept(demande, demande.getId());
             demande.setStatut(StatutConge.ACCEPTE);
             demande.setDateTraitement(LocalDateTime.now());
         } else {

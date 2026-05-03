@@ -1,7 +1,9 @@
 package com.example.conges.controller;
 
 import com.example.conges.dto.config.CountryPolicyConfigRequest;
+import com.example.conges.dto.config.EmployeeContractRhPatchRequest;
 import com.example.conges.dto.config.ExceptionalLeaveConfigRequest;
+import com.example.conges.dto.config.FranceRttSettingsDto;
 import com.example.conges.dto.config.LeaveTypeConfigRequest;
 import com.example.conges.dto.config.PublicHolidayCreateRequest;
 import com.example.conges.dto.config.WorkScheduleConfigRequest;
@@ -16,6 +18,7 @@ import com.example.conges.service.CountryPolicyService;
 import com.example.conges.service.HrConfigService;
 import com.example.conges.service.HrHolidayService;
 import com.example.conges.service.HrWorkScheduleService;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.validation.Valid;
@@ -26,6 +29,7 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -56,13 +60,59 @@ public class HrConfigController {
         return ResponseEntity.ok(countryPolicyService.upsertPolicy(
                 request.getCountryCode(),
                 request.getTypeConge(),
-                request.getAnnualQuota()
+                request.getAnnualQuota(),
+                request.getMonthlyAccrualRate(),
+                request.getRttEnabled(),
+                request.getRttAnnualDays()
         ));
     }
 
     @GetMapping("/leave-types")
     public ResponseEntity<List<LeaveType>> getLeaveTypes() {
         return ResponseEntity.ok(hrConfigService.getLeaveTypes());
+    }
+
+    @GetMapping("/france-rtt")
+    public ResponseEntity<Map<String, Object>> getFranceRttAdmin() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        FranceRttSettingsDto settingsDto = hrConfigService.getFranceRttSettings();
+        body.put("accrualMode", settingsDto.getAccrualMode() == null ? null : settingsDto.getAccrualMode().name());
+        body.put("adminOverrideDays", settingsDto.getAdminOverrideDays());
+        body.put("updatedAt", settingsDto.getUpdatedAt());
+        body.putAll(hrConfigService.franceRttFeatureFlags());
+        return ResponseEntity.ok(body);
+    }
+
+    @PutMapping("/france-rtt")
+    public ResponseEntity<Map<String, Object>> updateFranceRttAdmin(
+            @Valid @RequestBody FranceRttSettingsDto request
+    ) {
+        hrConfigService.upsertFranceRttSettings(request);
+        FranceRttSettingsDto settingsDto = hrConfigService.getFranceRttSettings();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("accrualMode", settingsDto.getAccrualMode() == null ? null : settingsDto.getAccrualMode().name());
+        body.put("adminOverrideDays", settingsDto.getAdminOverrideDays());
+        body.put("updatedAt", settingsDto.getUpdatedAt());
+        body.putAll(hrConfigService.franceRttFeatureFlags());
+        return ResponseEntity.ok(body);
+    }
+
+    @PatchMapping("/employees/{userId}/contract")
+    public ResponseEntity<Map<String, Object>> patchEmployeeContract(
+            @PathVariable Long userId,
+            @RequestBody EmployeeContractRhPatchRequest request
+    ) {
+        UserEntity refreshed = hrConfigService.patchEmployeeContract(userId, request);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("userId", refreshed.getId());
+        out.put("email", refreshed.getEmail());
+        out.put("weeklyHours", refreshed.getWeeklyHours());
+        out.put("annualWorkDays", refreshed.getAnnualWorkDays());
+        out.put("contractType", refreshed.getContractType());
+        out.put("contractActive", refreshed.isContractActive());
+        out.put("countryCode", refreshed.getCountryCode());
+        out.put("pays", refreshed.getPays());
+        return ResponseEntity.ok(out);
     }
 
     @PutMapping("/leave-types/{id}")

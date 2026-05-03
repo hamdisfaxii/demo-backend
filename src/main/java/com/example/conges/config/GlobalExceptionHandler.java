@@ -59,15 +59,15 @@ public class GlobalExceptionHandler {
                 .body(new ApiErrorResponse(false, message));
     }
 
-    @ExceptionHandler(RuntimeException.class)
-    public ResponseEntity<ApiErrorResponse> handleRuntimeException(RuntimeException ex) {
-        log.warn("RuntimeException: {}", ex.getMessage());
-        String message = ex.getMessage() != null && !ex.getMessage().isBlank()
-                ? ex.getMessage()
-                : "Non autorisé";
+    /**
+     * Sécurité API : ne pas exposer de stack interne ; éviter 401 erroné pour NPE / bugs métiers.
+     */
+    @ExceptionHandler(NullPointerException.class)
+    public ResponseEntity<ApiErrorResponse> handleNullPointer(NullPointerException ex) {
+        log.warn("NullPointerException (requête ou données partielles)");
         return ResponseEntity
-                .status(HttpStatus.UNAUTHORIZED)
-                .body(new ApiErrorResponse(false, message));
+                .status(HttpStatus.BAD_REQUEST)
+                .body(new ApiErrorResponse(false, "Données incomplètes ou indisponibles"));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

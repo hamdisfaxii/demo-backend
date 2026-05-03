@@ -17,4 +17,13 @@ public class CountryPolicyConfigRequest {
     @NotNull
     @Min(0)
     private Integer annualQuota;
+
+    /** Optionnel : taux mensuel CP (TN 1.83, MA 1.05, FR 2.08 si absent). */
+    private Double monthlyAccrualRate;
+
+    /** Pour France / courte durée uniquement. */
+    private Boolean rttEnabled;
+
+    /** Quota RTT annuel (France). */
+    private Integer rttAnnualDays;
 }

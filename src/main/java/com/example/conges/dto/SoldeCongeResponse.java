@@ -16,4 +16,9 @@ public class SoldeCongeResponse {
     private int totalJours;
     private int joursPris;
     private int joursRestants;
+
+    /** Précision décimale (ex. RTT mensuel cumul FR) ; null si hors périmètre. */
+    private Double totalExact;
+    private Double prisExact;
+    private Double restantsExact;
 }

@@ -188,21 +188,19 @@ const users = {
 const typesCongePays = {
   TN: {
     CONGES_PAYES: { nom: "Congés Payés", jours: 30, code: "CP" },
-    RTT: { nom: "RTT", jours: 10, code: "RTT" },
-    MALADIE: { nom: "Congé Maladie", jours: 0, code: "MAL" },
+    MALADIE: { nom: "Congé Maladie", jours: 7, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 180, code: "PAR" },
   },
   FR: {
     CONGES_PAYES: { nom: "Congés Payés", jours: 25, code: "CP" },
-    RTT: { nom: "RTT", jours: 12, code: "RTT" },
+    SORTIE_COURTE: { nom: "Sortie courte durée / RTT", jours: 10, code: "SCD" },
     MALADIE: { nom: "Congé Maladie", jours: 0, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 180, code: "PAR" },
     ENFANT_MALADE: { nom: "Congé Enfant Malade", jours: 5, code: "ENF" },
   },
   MA: {
     CONGES_PAYES: { nom: "Congés Payés", jours: 22, code: "CP" },
-    RTT: { nom: "Permission / courte durée", jours: 10, code: "RTT" },
-    MALADIE: { nom: "Congé Maladie", jours: 0, code: "MAL" },
+    MALADIE: { nom: "Congé Maladie", jours: 7, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 120, code: "PAR" },
   },
 };
@@ -379,11 +377,12 @@ function normalizeCongeLedgerKey(typeCongeRaw) {
   if (
     u === "RTT" ||
     u.includes("RTT") ||
+    u === "SORTIE_COURTE" ||
     u.includes("COURTE") ||
     u.includes("PERMISSION") ||
     u.includes("SORTIE")
   )
-    return "RTT";
+    return "SORTIE_COURTE";
   if (u.includes("PARENTAL")) return "PARENTAL";
   if (u.includes("ENFANT") || u.endsWith("_ENF") || u.includes("ENFANT_MALADE"))
     return "ENFANT_MALADE";
@@ -391,8 +390,113 @@ function normalizeCongeLedgerKey(typeCongeRaw) {
   return "CONGES_PAYES";
 }
 
-function absenceSansDecoteAuSolde(ledgerKey) {
-  return ledgerKey === "MALADIE" || ledgerKey === "CONGE_SANS_SOLDE";
+/** Droits maladie annuels selon configur pays (TN/MA : 7 j/an ; FR : 0 = hors carte décompte mock). */
+function maladieQuotaAnnuelPourPays(paysRaw) {
+  const p = normalizePaysForQuota(paysRaw);
+  const cfg = typesCongePays[p]?.MALADIE;
+  return cfg ? Math.max(0, Number(cfg.jours || 0)) : 0;
+}
+
+function absenceSansDecoteAuSolde(ledgerKey, paysNorm) {
+  if (ledgerKey === "CONGE_SANS_SOLDE") return true;
+  if (ledgerKey === "MALADIE") {
+    const q = maladieQuotaAnnuelPourPays(paysNorm);
+    return q <= 0;
+  }
+  return false;
+}
+
+/** Restant après déduction des jours déjà utilisés (registre local). */
+function getSoldeRestantPourLedger(userId, ledgerKey, paysRaw) {
+  const paysN = normalizePaysForQuota(paysRaw);
+  const typesUser = typesCongePays[paysN] || {};
+  let total = 0;
+  if (typesUser[ledgerKey]) {
+    total = Number(typesUser[ledgerKey].jours || 0);
+  }
+  const util = Number(kongesSoldes[userId]?.[ledgerKey]?.utilise ?? 0);
+  if (total > 0) return Math.max(0, total - util);
+  return Math.max(0, Number(kongesSoldes[userId]?.[ledgerKey]?.restant ?? 0));
+}
+
+function minutesBetweenHeures(hd, hf) {
+  const re = /^\d{1,2}:\d{2}/;
+  if (!re.test(String(hd || "")) || !re.test(String(hf || ""))) return NaN;
+  const [h1, m1] = String(hd)
+    .slice(0, 5)
+    .split(":")
+    .map(Number);
+  const [h2, m2] = String(hf)
+    .slice(0, 5)
+    .split(":")
+    .map(Number);
+  if ([h1, m1, h2, m2].some((n) => !Number.isFinite(n))) return NaN;
+  return h2 * 60 + m2 - (h1 * 60 + m1);
+}
+
+/** Autorisations 2h hors France : compte les demandes actives du mois calendaire courant. */
+function countMockNonFrShortHourlyInMonth(userId, dateDebutStr) {
+  const cap = 3;
+  const fixedMin = 120;
+  const d0 = new Date(`${dateDebutStr}T12:00:00`);
+  if (Number.isNaN(d0.getTime())) return { utilisees: 0, acceptees: 0, cap };
+  const y = d0.getFullYear();
+  const mo = d0.getMonth();
+  const inMonth = (ds) => {
+    const d = new Date(`${ds}T12:00:00`);
+    return !Number.isNaN(d.getTime()) && d.getFullYear() === y && d.getMonth() === mo;
+  };
+  let utilisees = 0;
+  let acceptees = 0;
+  for (const d of demandes) {
+    if (Number(d.userId) !== Number(userId)) continue;
+    if (!inMonth(d.dateDebut)) continue;
+    if (normalizeCongeLedgerKey(d.typeConge) !== "SORTIE_COURTE") continue;
+    const mins =
+      d.dureePermissionMinutes != null
+        ? Number(d.dureePermissionMinutes)
+        : minutesBetweenHeures(d.heureDebut, d.heureFin);
+    if (mins !== fixedMin) continue;
+    const st = String(d.statut || "").toUpperCase();
+    if (st.includes("REFUS") || st.includes("ANNU")) continue;
+    utilisees += 1;
+    if (st.includes("APPROUVE_RH") || st.includes("ACCEPTE") || st === "APPROUVE")
+      acceptees += 1;
+  }
+  return { utilisees, acceptees, cap };
+}
+
+/** Compte uniquement les autorisations 2 h déjà acceptées (pour bloquer une 4e validation). */
+function countAcceptedMockNonFrShortInMonth(userId, dateDebutStr, excludeDemandeId) {
+  const fixedMin = 120;
+  const d0 = new Date(`${dateDebutStr}T12:00:00`);
+  if (Number.isNaN(d0.getTime())) return 0;
+  const y = d0.getFullYear();
+  const mo = d0.getMonth();
+  const inMonth = (ds) => {
+    const d = new Date(`${ds}T12:00:00`);
+    return !Number.isNaN(d.getTime()) && d.getFullYear() === y && d.getMonth() === mo;
+  };
+  let acceptees = 0;
+  for (const d of demandes) {
+    if (excludeDemandeId != null && Number(d.id) === Number(excludeDemandeId)) continue;
+    if (Number(d.userId) !== Number(userId)) continue;
+    if (!inMonth(d.dateDebut)) continue;
+    if (normalizeCongeLedgerKey(d.typeConge) !== "SORTIE_COURTE") continue;
+    const mins =
+      d.dureePermissionMinutes != null
+        ? Number(d.dureePermissionMinutes)
+        : minutesBetweenHeures(d.heureDebut, d.heureFin);
+    if (mins !== fixedMin) continue;
+    const st = String(d.statut || "").toUpperCase();
+    if (
+      st.includes("APPROUVE_RH") ||
+      st.includes("ACCEPTE") ||
+      st === "APPROUVE"
+    )
+      acceptees += 1;
+  }
+  return acceptees;
 }
 
 const exceptionalLeavesByCountry = {
@@ -690,11 +794,10 @@ async function bootstrapPublicHolidaysOnStartup() {
 const kongesSoldes = {
   1: {
     CONGES_PAYES: { solde_initial: 30, utilise: 8, restant: 22 },
-    RTT: { solde_initial: 10, utilise: 2, restant: 8 },
   },
   2: {
     CONGES_PAYES: { solde_initial: 25, utilise: 5, restant: 20 },
-    RTT: { solde_initial: 12, utilise: 0, restant: 12 },
+    SORTIE_COURTE: { solde_initial: 10, utilise: 0, restant: 10 },
   },
 };
 
@@ -800,12 +903,26 @@ function calculerJoursOuvrables(dateDebut, dateFin, pays) {
 }
 
 function validerDates(dateDebut, dateFin) {
+  if (dateDebut == null || dateFin == null || String(dateDebut).trim() === "" || String(dateFin).trim() === "") {
+    return { valid: false, error: "Dates de début et de fin obligatoires." };
+  }
   const debut = new Date(dateDebut);
   const fin = new Date(dateFin);
+  if (Number.isNaN(debut.getTime()) || Number.isNaN(fin.getTime())) {
+    return { valid: false, error: "Format de date invalide." };
+  }
 
-  if (debut > fin)
+  const startDay = new Date(debut.getFullYear(), debut.getMonth(), debut.getDate());
+  const endDay = new Date(fin.getFullYear(), fin.getMonth(), fin.getDate());
+  if (startDay > endDay) {
     return { valid: false, error: "Date de début > date de fin" };
-  if (debut < new Date()) return { valid: false, error: "Date passée" };
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (startDay < today) {
+    return { valid: false, error: "La date de début ne peut pas être dans le passé." };
+  }
 
   return { valid: true };
 }
@@ -1031,7 +1148,7 @@ app.post("/api/auth/login", async (req, res) => {
             // On peut mapper par le nom ou créer une table de correspondance
             const typeKey = Object.keys(typesCongePaysUser).find((key) => {
               const localType = typesCongePaysUser[key];
-              // Correspondance simple: CP<->CP, RTT<->RTT, etc.
+              // Correspondance simple: CP<->CP, sortie courte<->SORTIE_COURTE, etc.
               return (
                 localType.code.substring(0, 3) === typeId.toString() ||
                 localType.nom.includes(typeId.toString())
@@ -1042,8 +1159,11 @@ app.post("/api/auth/login", async (req, res) => {
             if (availableDays > 0) {
               // Déterminer le type basé sur le nombre de jours (heuristique)
               let mappedKey = "CONGES_PAYES"; // Par défaut
-              if (availableDays === 10 || availableDays === 12) {
-                mappedKey = "RTT";
+              if (
+                (availableDays === 10 || availableDays === 12) &&
+                typesCongePaysUser.SORTIE_COURTE
+              ) {
+                mappedKey = "SORTIE_COURTE";
               } else if (availableDays === 180) {
                 mappedKey = "PARENTAL";
               } else if (
@@ -1168,19 +1288,21 @@ const buildSoldeResponse = (userId) => {
   const byType = (key) =>
     details.find((d) => d.type === key) || null;
   const cp = byType("CONGES_PAYES");
-  const rtt = byType("RTT");
+  const ligneSortieCourte = byType("SORTIE_COURTE"); /* registre uniquement pays FR dans typesCongePays */
   const mal = byType("MALADIE");
 
   const soldeCongesPayes = Math.max(
     0,
     cp ? Number(cp.solde_restant || 0) : 0,
   );
-  const soldeCourteDuree = rtt ? Math.max(0, Number(rtt.solde_restant || 0)) : 0;
+  const soldeCourteDuree = ligneSortieCourte
+    ? Math.max(0, Number(ligneSortieCourte.solde_restant || 0))
+    : 0;
   /** 0 dans la config mock = hors quota (légitimation), pas une « carte » de jours. */
   const maladieCfg = mal ? Number(mal.solde_initial || 0) : 0;
   const maladieNonDecompte = maladieCfg <= 0;
   const soldeMaladie = maladieNonDecompte
-    ? null
+    ? 0
     : Math.max(0, Number(mal?.solde_restant ?? 0));
 
   /** @deprecated Agrégé tous types ; préférez soldeCongesPayes (+ details). Conservé pour compat. */
@@ -1189,20 +1311,26 @@ const buildSoldeResponse = (userId) => {
     0,
   );
 
+  const paysNormSolde = normalizePaysForQuota(user.pays);
+  const todayStr = new Date().toISOString().split("T")[0];
+  const shortMois =
+    paysNormSolde !== "FR"
+      ? countMockNonFrShortHourlyInMonth(userId, todayStr)
+      : null;
+
   return {
     /** Solde congés payés uniquement — utilisé formulaire « Congé payé ». */
     solde: soldeCongesPayes,
     soldeCongesPayes,
     soldeCourteDuree,
-    /** Permission courte durée = RTT dans le mock. */
     soldePermission: soldeCourteDuree,
     soldeMaladie,
+    maladieQuotaReference: maladieCfg,
     maladieNonDecompte,
     /** Texte métier lisible côté UI (maladie hors quota lorsque jours = 0). */
-    messageMaladie:
-      maladieNonDecompte
-        ? "Congé maladie défini hors quota : il ne diminue ni vos congés payés ni vos permissions courte durée (RTT)."
-        : null,
+    messageMaladie: maladieNonDecompte
+      ? "Congé maladie : suivi hors quota décompté dans l’application selon vos règles RH."
+      : "",
     /** Rappel : le champ « solde » n’agrège pas parental / quotas séparés. */
     hintCongesPayes:
       "Astuce : le solde principal correspond aux congés payés uniquement. Les autres types ont leur carte ou ligne de détail.",
@@ -1210,6 +1338,17 @@ const buildSoldeResponse = (userId) => {
     soldes: details,
     reste: soldeCongesPayes,
     soldeTotalTousTypes: totalRestantTousTypes,
+    ...(shortMois
+      ? {
+          autorisationsCourtesMoisMaximum: shortMois.cap,
+          autorisationsCourtesMoisUtilisees: shortMois.utilisees,
+          autorisationsCourtesMoisAcceptees: shortMois.acceptees,
+          autorisationsCourtesMoisRestantes: Math.max(
+            0,
+            shortMois.cap - shortMois.utilisees,
+          ),
+        }
+      : {}),
   };
 };
 
@@ -1241,7 +1380,13 @@ app.get("/api/conge/solde/:userId", (req, res) => {
 
 app.post("/api/demande", (req, res) => {
   const { userId, typeConge, dateDebut, dateFin, raison, heureDebut, heureFin } = req.body;
-  const user = users[userId];
+  const uid = userId != null && userId !== "" ? Number(userId) : NaN;
+  if (!Number.isFinite(uid)) {
+    return res.status(400).json({
+      error: "Identifiant utilisateur invalide ou session incomplète. Reconnectez-vous.",
+    });
+  }
+  const user = users[uid];
 
   if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
 
@@ -1250,23 +1395,43 @@ app.post("/api/demande", (req, res) => {
     return res.status(400).json({ error: validationDates.error });
   }
 
-  const nombreJours = calculerJoursOuvrables(dateDebut, dateFin, user.pays);
   const ledgerKey = normalizeCongeLedgerKey(typeConge);
+  const paysNorm = normalizePaysForQuota(user.pays);
 
-  if (!absenceSansDecoteAuSolde(ledgerKey)) {
-    const soldeRestant =
-      kongesSoldes[userId]?.[ledgerKey]?.restant ??
-      kongesSoldes[userId]?.[typeConge]?.restant ??
-      0;
-    if (nombreJours > soldeRestant) {
+  let nombreJours = calculerJoursOuvrables(dateDebut, dateFin, user.pays);
+
+  /** Hors France : autorisation 2 h, plafond 3/mois, sans décompte RTT. */
+  if (ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR") {
+    const mins = minutesBetweenHeures(heureDebut, heureFin);
+    if (mins !== 120) {
       return res.status(400).json({
-        error: `Solde insuffisant (${soldeRestant} jours restants sur ${ledgerKey}).`,
+        error: "Durée invalide : exactement 2 heures sont attendues pour une autorisation courte.",
       });
+    }
+    const { utilisees, cap } = countMockNonFrShortHourlyInMonth(uid, dateDebut);
+    if (utilisees >= cap) {
+      return res.status(400).json({
+        error: "Limite mensuelle de 3 autorisations courtes atteinte.",
+      });
+    }
+    nombreJours = 0;
+  }
+
+  if (!absenceSansDecoteAuSolde(ledgerKey, paysNorm)) {
+    if (ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR") {
+      /* quota journalier FR uniquement dans le registre mock */
+    } else {
+      const soldeRestant = getSoldeRestantPourLedger(userId, ledgerKey, user.pays);
+      if (nombreJours > soldeRestant) {
+        return res.status(400).json({
+          error: `Solde insuffisant : il reste ${soldeRestant} jour(s) pour ce type de demande.`,
+        });
+      }
     }
   }
 
   if (
-    ledgerKey === "RTT" ||
+    ledgerKey === "SORTIE_COURTE" ||
     String(typeConge).toUpperCase() === "RTT"
   ) {
     if (!heureDebut || !heureFin) {
@@ -1282,14 +1447,18 @@ app.post("/api/demande", (req, res) => {
     }
   }
 
+  const dureePermissionMinutes =
+    ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR" ? 120 : null;
+
   const newDemande = {
     id: Math.max(...demandes.map((d) => d.id), 0) + 1,
-    userId,
+    userId: uid,
     typeConge,
     dateDebut,
     dateFin,
     heureDebut: heureDebut || null,
     heureFin: heureFin || null,
+    dureePermissionMinutes,
     nombreJours,
     raison,
     statut: "EN_ATTENTE",
@@ -1298,7 +1467,7 @@ app.post("/api/demande", (req, res) => {
       {
         date: new Date().toISOString().split("T")[0],
         action: "CREATION",
-        user_id: userId,
+        user_id: uid,
       },
     ],
     workflow: {
@@ -1397,6 +1566,28 @@ app.post("/api/demande/:id/rh-approve", (req, res) => {
     return res.status(403).json({ error: "Pas de permission RH" });
   }
 
+  const employeeId = demande.userId;
+  const paysEmployee = normalizePaysForQuota(users[employeeId].pays);
+  const ledgerPre = normalizeCongeLedgerKey(demande.typeConge);
+  if (ledgerPre === "SORTIE_COURTE" && paysEmployee !== "FR") {
+    const mins =
+      demande.dureePermissionMinutes != null
+        ? Number(demande.dureePermissionMinutes)
+        : minutesBetweenHeures(demande.heureDebut, demande.heureFin);
+    if (mins === 120) {
+      const dejaAcceptees = countAcceptedMockNonFrShortInMonth(
+        employeeId,
+        demande.dateDebut,
+        demande.id,
+      );
+      if (dejaAcceptees >= 3) {
+        return res.status(400).json({
+          error: "Limite mensuelle de 3 autorisations courtes atteinte.",
+        });
+      }
+    }
+  }
+
   demande.workflow.rh_status = "APPROUVE";
   demande.historique.push({
     date: new Date().toISOString().split("T")[0],
@@ -1407,12 +1598,13 @@ app.post("/api/demande/:id/rh-approve", (req, res) => {
   demande.statut = "APPROUVE_RH";
 
   // 📊 MISE À JOUR DU SOLDE DE CONGÉ
-  const employeeId = demande.userId;
   const typeCongeDemande = demande.typeConge;
   const ledgerKey = normalizeCongeLedgerKey(typeCongeDemande);
-  const nbreJours = demande.nombreJours || 1;
-
-  if (!absenceSansDecoteAuSolde(ledgerKey)) {
+  const nbreJours =
+    ledgerKey === "SORTIE_COURTE" && paysEmployee !== "FR"
+      ? 0
+      : demande.nombreJours || 1;
+  if (!absenceSansDecoteAuSolde(ledgerKey, paysEmployee)) {
     if (!kongesSoldes[employeeId]) kongesSoldes[employeeId] = {};
     if (!kongesSoldes[employeeId][ledgerKey]) {
       kongesSoldes[employeeId][ledgerKey] = { utilise: 0, restant: 0 };
@@ -1449,7 +1641,7 @@ app.post("/api/demande/:id/annuler", (req, res) => {
     const nbreJours = demande.nombreJours || 1;
 
     if (
-      !absenceSansDecoteAuSolde(ledgerKey) &&
+      !absenceSansDecoteAuSolde(ledgerKey, normalizePaysForQuota(users[employeeId].pays)) &&
       kongesSoldes[employeeId]?.[ledgerKey]
     ) {
       kongesSoldes[employeeId][ledgerKey].utilise -= nbreJours;

@@ -32,6 +32,13 @@ public class DemandeCongeRequest {
     private LocalTime heureDebut;
     private LocalTime heureFin;
 
+    /** True uniquement depuis l’écran « permission / sortie courte » (sécurise l’API). */
+    private Boolean demandeSortieCourte;
+
+    public boolean isDemandeSortieCourte() {
+        return Boolean.TRUE.equals(demandeSortieCourte);
+    }
+
     // Getter pour obtenir le TypeConge basé sur le titre
     public TypeConge getTypeConge() {
         if (titre == null) {

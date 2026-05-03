@@ -14,14 +14,21 @@ import com.example.conges.entity.UserEntity;
 import com.example.conges.repository.EmployeeLeaveAllocationRepository;
 import com.example.conges.repository.LeaveTypeRepository;
 import com.example.conges.repository.UserRepository;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.LocalDate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -31,6 +38,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
@@ -60,6 +68,7 @@ public class DolibarrService {
     private final EmployeeLeaveAllocationRepository employeeLeaveAllocationRepository;
     private final LeaveTypeRepository leaveTypeRepository;
     private final DolibarrSyncLogService dolibarrSyncLogService;
+    private final FranceRttLedgerService franceRttLedgerService;
     private final JdbcTemplate jdbcTemplate;
     private final RestTemplate restTemplate = new RestTemplate();
 
@@ -348,40 +357,62 @@ public class DolibarrService {
     }
 
     /**
-     * Récupère les allocations de congés par employé depuis Dolibarr
+     * Récupère les allocations depuis l’API REST Dolibarr (toutes, ou filtre optionnel fk_user selon versions).
      */
     public List<DolibarrLeaveAllocationDto> getLeaveAllocationsFromDolibarr() {
+        return fetchLeaveAllocationsFromDolibarrApi(null);
+    }
+
+    /**
+     * Tente plusieurs variantes REST ; si filtre fk_user refuse côté Dolibarr, repli liste complète puis filtre local.
+     */
+    private List<DolibarrLeaveAllocationDto> fetchLeaveAllocationsFromDolibarrApi(Long fkUserDolibarr) {
         if (!isDolibarrConfigured()) {
             log.warn("Dolibarr n'est pas configuré");
             return new ArrayList<>();
         }
+        HttpHeaders headers = createHeaders();
+        HttpEntity<?> entity = new HttpEntity<>(headers);
 
-        try {
-            // Note: Le endpoint varie selon la version Dolibarr
-            // Peut être: /leaves/allocations, /hrm/allocations, /leaves
-            String url = dolibarrUrl + "/leaves/allocations?sortfield=rowid&sortorder=ASC&limit=500";
-            HttpHeaders headers = createHeaders();
-            HttpEntity<?> entity = new HttpEntity<>(headers);
-
-            ResponseEntity<DolibarrLeaveAllocationDto[]> response = restTemplate.exchange(
-                    url,
-                    HttpMethod.GET,
-                    entity,
-                    DolibarrLeaveAllocationDto[].class
-            );
-
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                log.info("Récupération de {} allocations de congés depuis Dolibarr", response.getBody().length);
-                return List.of(response.getBody());
+        List<String> attempts = new ArrayList<>();
+        if (fkUserDolibarr != null) {
+            try {
+                attempts.add(dolibarrUrl + "/leaves/allocations?sortfield=rowid&sortorder=ASC&limit=5000&sqlfilters="
+                        + URLEncoder.encode("(t.fk_user:=:" + fkUserDolibarr + ")", StandardCharsets.UTF_8));
+            } catch (Exception ignored) {
+                // URLEncoder ne devrait pas échouer sur UTF-8
             }
-
-            log.warn("Aucune allocation de congé trouvée sur Dolibarr");
-            return new ArrayList<>();
-
-        } catch (RestClientException e) {
-            log.error("Erreur lors de la récupération des allocations de congés: {}", e.getMessage());
-            return new ArrayList<>();
         }
+        attempts.add(dolibarrUrl + "/leaves/allocations?sortfield=rowid&sortorder=ASC&limit=5000");
+
+        RestClientException last = null;
+        for (String url : attempts) {
+            try {
+                ResponseEntity<DolibarrLeaveAllocationDto[]> response = restTemplate.exchange(
+                        url,
+                        HttpMethod.GET,
+                        entity,
+                        DolibarrLeaveAllocationDto[].class);
+
+                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                    List<DolibarrLeaveAllocationDto> list = List.of(response.getBody());
+                    if (fkUserDolibarr != null) {
+                        list = list.stream()
+                                .filter(a -> fkUserDolibarr.equals(a.getEmployeeId()))
+                                .toList();
+                    }
+                    if (!list.isEmpty() || fkUserDolibarr == null) {
+                        log.debug("REST allocations Dolibarr: {} lignes", list.size());
+                        return new ArrayList<>(list);
+                    }
+                }
+            } catch (RestClientException e) {
+                last = e;
+            }
+        }
+
+        log.debug("REST allocations Dolibarr indisponibles: {}", last == null ? "aucune réponse utile" : last.getMessage());
+        return new ArrayList<>();
     }
 
     /**
@@ -524,6 +555,10 @@ public class DolibarrService {
         if (demande.getDolibarrLeaveRequestId() != null) {
             leaveUpdated = updateLeaveStatus(demande.getDolibarrLeaveRequestId(), "APPROVED", demande);
         }
+        franceRttLedgerService.consumeFranceRttLedgerOnApprovedLeave(demande);
+        if (franceRttLedgerService.shouldSkipDolibarrConsumption(demande)) {
+            return leaveUpdated;
+        }
         boolean allocationUpdated = consumeAllocationForApprovedLeave(demande);
         if (allocationUpdated) {
             refreshAllocationsForUser(demande.getUser(), demande.getDateDebut().getYear());
@@ -531,51 +566,334 @@ public class DolibarrService {
         return leaveUpdated && allocationUpdated;
     }
 
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void refreshAllocationsForUser(UserEntity user, int year) {
         if (user == null || user.getDolibarrId() == null || !isDolibarrConfigured()) {
             return;
         }
-        List<DolibarrLeaveAllocationDto> remoteAllocations = getLeaveAllocationsFromDolibarr().stream()
+        try {
+            List<DolibarrLeaveAllocationDto> merged = mergeJdbcFirstAllocationsForUser(user.getDolibarrId(), year);
+
+            for (DolibarrLeaveAllocationDto remote : merged) {
+                if (!remote.isActive()) {
+                    continue;
+                }
+                Long fkTypeRef = remote.getTypeCongeId();
+                if (fkTypeRef == null) {
+                    continue;
+                }
+
+                LeaveType leaveType = ensureLeaveTypePresent(fkTypeRef);
+                if (leaveType == null) {
+                    continue;
+                }
+
+                int anneeEffective = remote.getAnnee() == null ? year : remote.getAnnee();
+                Double effAvail = remote.resolveEffectiveQtyAvailable();
+                Double initVal =
+                        remote.getJoursInitiaux() != null ? remote.getJoursInitiaux() : effAvail;
+                Double usedVal = remote.getJoursUtilises() != null ? remote.getJoursUtilises() : 0D;
+
+                Long allocRemoteId =
+                        normalizeAllocationRemoteId(remote, user.getDolibarrId(), fkTypeRef);
+
+                sanitizeAllocationDates(remote, anneeEffective);
+                LocalDate dDebut = remote.getDateDebut();
+                LocalDate dFin = remote.getDateFin();
+
+                EmployeeLeaveAllocation persisted = employeeLeaveAllocationRepository
+                        .findByDolibarrAllocationId(allocRemoteId)
+                        .orElse(null);
+                if (persisted == null) {
+                    persisted = employeeLeaveAllocationRepository
+                            .findByEmployeeAndLeaveTypeAndAnneeAndActiveTrue(user, leaveType, anneeEffective)
+                            .orElse(null);
+                }
+
+                if (persisted != null) {
+                    persisted.setLeaveType(leaveType);
+                    persisted.setDolibarrAllocationId(allocRemoteId);
+                    persisted.setJoursInitiaux(initVal);
+                    persisted.setJoursUtilises(usedVal);
+                    persisted.setJoursDisponibles(effAvail);
+                    persisted.setAnnee(anneeEffective);
+                    persisted.setDateDebut(dDebut);
+                    persisted.setDateFin(dFin);
+                    persisted.setActive(remote.isActive());
+                    persisted.setUpdatedAt(LocalDateTime.now());
+                    employeeLeaveAllocationRepository.save(persisted);
+                } else {
+                    EmployeeLeaveAllocation newAllocation = EmployeeLeaveAllocation.builder()
+                            .employee(user)
+                            .leaveType(leaveType)
+                            .dolibarrAllocationId(allocRemoteId)
+                            .joursInitiaux(initVal)
+                            .joursUtilises(usedVal)
+                            .joursDisponibles(effAvail)
+                            .annee(anneeEffective)
+                            .dateDebut(dDebut)
+                            .dateFin(dFin)
+                            .active(remote.isActive())
+                            .createdAt(LocalDateTime.now())
+                            .updatedAt(LocalDateTime.now())
+                            .build();
+                    employeeLeaveAllocationRepository.save(newAllocation);
+                }
+            }
+        } catch (RuntimeException ex) {
+            log.warn(
+                    "Rafraîchissement allocations Dolibarr pour fk_user={}: {}",
+                    user.getDolibarrId(),
+                    ex.getMessage());
+        }
+    }
+
+    private static Long normalizeAllocationRemoteId(
+            DolibarrLeaveAllocationDto remote, Long fkUserDolibarr, Long fkType) {
+        if (remote.getId() != null && remote.getId() > 0) {
+            return remote.getId();
+        }
+        return jdbcSurrogateAllocationId(fkUserDolibarr, fkType);
+    }
+
+    private static long jdbcSurrogateAllocationId(long fkUser, long fkType) {
+        return jdbcSurrogateAllocationId(Long.valueOf(fkUser), Long.valueOf(fkType));
+    }
+
+    private static long jdbcSurrogateAllocationId(Long fkUser, Long fkType) {
+        long u = fkUser == null ? 0 : fkUser;
+        long t = fkType == null ? 0 : fkType;
+        return -(u * 1_000_000L + t);
+    }
+
+    /**
+     * Données lues depuis {@code llx_holiday_users} (même cluster MySQL Dolibarr) — écrasent la réponse REST si les deux sont présentes.
+     */
+    private List<DolibarrLeaveAllocationDto> mergeJdbcFirstAllocationsForUser(Long fkUserDolibarr, int year) {
+        List<DolibarrLeaveAllocationDto> api = fetchLeaveAllocationsFromDolibarrApi(fkUserDolibarr).stream()
                 .filter(DolibarrLeaveAllocationDto::isActive)
-                .filter(a -> user.getDolibarrId().equals(a.getEmployeeId()))
+                .filter(a -> fkUserDolibarr.equals(a.getEmployeeId()))
                 .filter(a -> a.getAnnee() == null || a.getAnnee().equals(year))
                 .toList();
+        List<DolibarrLeaveAllocationDto> jdbc = fetchHolidayBalancesFromJdbc(fkUserDolibarr, year);
 
-        for (DolibarrLeaveAllocationDto remote : remoteAllocations) {
-            Optional<LeaveType> leaveTypeOpt = leaveTypeRepository.findByDolibarrLeaveTypeId(remote.getTypeCongeId());
-            if (leaveTypeOpt.isEmpty()) {
-                continue;
+        Map<String, DolibarrLeaveAllocationDto> merged = new LinkedHashMap<>();
+        for (DolibarrLeaveAllocationDto a : api) {
+            merged.put(allocMergeKey(a, year), sanitizeAllocationDates(a, year));
+        }
+        for (DolibarrLeaveAllocationDto a : jdbc) {
+            merged.put(allocMergeKey(a, year), sanitizeAllocationDates(a, year));
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private static String allocMergeKey(DolibarrLeaveAllocationDto a, int defaultYear) {
+        int y = a.getAnnee() == null ? defaultYear : a.getAnnee();
+        return (a.getEmployeeId() != null ? a.getEmployeeId() : "") + "_" + a.getTypeCongeId() + "_" + y;
+    }
+
+    private static DolibarrLeaveAllocationDto sanitizeAllocationDates(DolibarrLeaveAllocationDto a, int defaultYear) {
+        if (a.getAnnee() == null) {
+            a.setAnnee(defaultYear);
+        }
+        if (a.getDateDebut() == null || a.getDateFin() == null) {
+            a.setDateDebut(java.time.LocalDate.of(a.getAnnee(), 1, 1));
+            a.setDateFin(java.time.LocalDate.of(a.getAnnee(), 12, 31));
+        }
+        return a;
+    }
+
+    private List<DolibarrLeaveAllocationDto> fetchHolidayBalancesFromJdbc(Long fkUserDolibarr, int defaultYear) {
+        if (fkUserDolibarr == null) {
+            return Collections.emptyList();
+        }
+        String tbl = qualifiedDolibarrTableName("holiday_users");
+        try {
+            String sql = "SELECT fk_user, fk_type, nb_holiday FROM `" + tbl + "` WHERE fk_user = ?";
+            return jdbcTemplate.query(
+                    sql, ps -> ps.setLong(1, fkUserDolibarr), (rs, rowNum) -> mapJdbcHolidayUsersRow(rs, defaultYear));
+        } catch (Exception ex) {
+            log.debug("Lecture table Dolibarr {} ignorée : {}", tbl, ex.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    private DolibarrLeaveAllocationDto mapJdbcHolidayUsersRow(ResultSet rs, int defaultYear)
+            throws SQLException {
+        long fku = rs.getLong("fk_user");
+        long fkt = rs.getLong("fk_type");
+        double nbHoliday = rs.getDouble("nb_holiday");
+
+        DolibarrLeaveAllocationDto d = new DolibarrLeaveAllocationDto();
+        d.setId(jdbcSurrogateAllocationId(fku, fkt));
+        d.setEmployeeId(fku);
+        d.setTypeCongeId(fkt);
+        d.setAnnee(defaultYear);
+        d.setJoursDisponibles(nbHoliday);
+        d.setJoursInitiaux(nbHoliday);
+        d.setJoursUtilises(0D);
+        d.setDateDebut(LocalDate.of(defaultYear, 1, 1));
+        d.setDateFin(LocalDate.of(defaultYear, 12, 31));
+        d.setActive(1);
+        return d;
+    }
+
+    private LeaveType ensureLeaveTypePresent(Long dolibarrTypeIdObj) {
+        if (dolibarrTypeIdObj == null) {
+            return null;
+        }
+        long dolibarrTypeId = dolibarrTypeIdObj.longValue();
+        Optional<LeaveType> existing = leaveTypeRepository.findByDolibarrLeaveTypeId(dolibarrTypeId);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        loadHolidayTypeFromJdbc(dolibarrTypeId).ifPresent(this::persistLeaveTypeFromJdbcRow);
+
+        Optional<LeaveType> afterJdbc = leaveTypeRepository.findByDolibarrLeaveTypeId(dolibarrTypeId);
+        if (afterJdbc.isPresent()) {
+            return afterJdbc.get();
+        }
+
+        for (DolibarrLeaveTypeDto d : getLeaveTypesFromDolibarr()) {
+            if (d.getId() != null && dolibarrTypeId == d.getId()) {
+                return persistLeaveTypeFromDolibarrApi(d);
             }
-            LeaveType leaveType = leaveTypeOpt.get();
-            Optional<EmployeeLeaveAllocation> existing = employeeLeaveAllocationRepository.findByDolibarrAllocationId(remote.getId());
-            if (existing.isPresent()) {
-                EmployeeLeaveAllocation allocation = existing.get();
-                allocation.setJoursInitiaux(remote.getJoursInitiaux());
-                allocation.setJoursUtilises(remote.getJoursUtilises());
-                allocation.setJoursDisponibles(remote.getJoursDisponibles());
-                allocation.setAnnee(remote.getAnnee() == null ? year : remote.getAnnee());
-                allocation.setDateDebut(remote.getDateDebut());
-                allocation.setDateFin(remote.getDateFin());
-                allocation.setActive(remote.isActive());
-                allocation.setUpdatedAt(LocalDateTime.now());
-                employeeLeaveAllocationRepository.save(allocation);
-            } else {
-                EmployeeLeaveAllocation newAllocation = EmployeeLeaveAllocation.builder()
-                        .employee(user)
-                        .leaveType(leaveType)
-                        .dolibarrAllocationId(remote.getId())
-                        .joursInitiaux(remote.getJoursInitiaux())
-                        .joursUtilises(remote.getJoursUtilises())
-                        .joursDisponibles(remote.getJoursDisponibles())
-                        .annee(remote.getAnnee() == null ? year : remote.getAnnee())
-                        .dateDebut(remote.getDateDebut())
-                        .dateFin(remote.getDateFin())
-                        .active(remote.isActive())
-                        .createdAt(LocalDateTime.now())
-                        .updatedAt(LocalDateTime.now())
-                        .build();
-                employeeLeaveAllocationRepository.save(newAllocation);
+        }
+        log.warn("Type de congé Dolibarr rowid {} introuvable (c_holiday_types / REST).", dolibarrTypeId);
+        return null;
+    }
+
+    private Optional<HolidayJdbcTypeRow> loadHolidayTypeFromJdbc(long rowid) {
+        String tbl = qualifiedDolibarrTableName("c_holiday_types");
+        try {
+            String sql =
+                    "SELECT rowid, code, label, delay, active FROM `" + tbl + "` WHERE rowid = ? LIMIT 1";
+            List<HolidayJdbcTypeRow> rows = jdbcTemplate.query(
+                    sql,
+                    ps -> ps.setLong(1, rowid),
+                    (rs, rn) ->
+                            new HolidayJdbcTypeRow(
+                                    rs.getLong("rowid"),
+                                    rs.getString("code"),
+                                    rs.getString("label"),
+                                    getNullableInt(rs, "delay"),
+                                    rs.getObject("active") == null ? 1 : rs.getInt("active")));
+            return rows.isEmpty() ? Optional.empty() : Optional.of(rows.get(0));
+        } catch (Exception ex) {
+            log.debug("c_holiday_types rowid {} : {}", rowid, ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private static Integer getNullableInt(ResultSet rs, String column) throws SQLException {
+        int v = rs.getInt(column);
+        return rs.wasNull() ? null : v;
+    }
+
+    private void persistLeaveTypeFromJdbcRow(HolidayJdbcTypeRow r) {
+        LocalDateTime now = LocalDateTime.now();
+        LeaveType lt = leaveTypeRepository
+                .findByDolibarrLeaveTypeId(r.rowid())
+                .orElseGet(
+                        () ->
+                                LeaveType.builder()
+                                        .dolibarrLeaveTypeId(r.rowid())
+                                        .code(sanitizeHolidayCode(r.code(), r.rowid()))
+                                        .libelle(
+                                                r.label() != null && !r.label().isBlank()
+                                                        ? r.label()
+                                                        : sanitizeHolidayCode(r.code(), r.rowid()))
+                                        .description("")
+                                        .active(r.activeFlag() == null || r.activeFlag() == 1)
+                                        .requiresApproval(true)
+                                        .delai(r.delay() != null ? r.delay().longValue() : 0L)
+                                        .createdAt(now)
+                                        .updatedAt(now)
+                                        .build());
+        lt.setCode(sanitizeHolidayCode(r.code(), r.rowid()));
+        lt.setLibelle(
+                r.label() != null && !r.label().isBlank() ? r.label() : lt.getCode());
+        lt.setActive(r.activeFlag() == null || r.activeFlag() == 1);
+        lt.setDelai(r.delay() != null ? r.delay().longValue() : lt.getDelai());
+        lt.setUpdatedAt(now);
+        leaveTypeRepository.save(lt);
+    }
+
+    private LeaveType persistLeaveTypeFromDolibarrApi(DolibarrLeaveTypeDto d) {
+        if (d == null || d.getId() == null) {
+            return null;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        long idVal = d.getId();
+        LeaveType lt =
+                leaveTypeRepository
+                        .findByDolibarrLeaveTypeId(idVal)
+                        .orElseGet(
+                                () ->
+                                        LeaveType.builder()
+                                                .dolibarrLeaveTypeId(idVal)
+                                                .code(sanitizeHolidayCode(d.getCode(), idVal))
+                                                .libelle(
+                                                        d.getLibelle() != null
+                                                                ? d.getLibelle()
+                                                                : sanitizeHolidayCode(d.getCode(), idVal))
+                                                .description(
+                                                        d.getDescription() != null ? d.getDescription() : "")
+                                                .couleur(d.getCouleur())
+                                                .active(d.isActive())
+                                                .requiresApproval(d.requiresApproval())
+                                                .delai(
+                                                        d.getDelai() != null
+                                                                ? d.getDelai().longValue()
+                                                                : 0L)
+                                                .createdAt(now)
+                                                .updatedAt(now)
+                                                .build());
+        lt.setCode(sanitizeHolidayCode(d.getCode(), idVal));
+        if (d.getLibelle() != null) {
+            lt.setLibelle(d.getLibelle());
+        }
+        lt.setCouleur(d.getCouleur());
+        lt.setActive(d.isActive());
+        lt.setRequiresApproval(d.requiresApproval());
+        if (d.getDelai() != null) {
+            lt.setDelai(d.getDelai().longValue());
+        }
+        lt.setUpdatedAt(now);
+        return leaveTypeRepository.save(lt);
+    }
+
+    private static String sanitizeHolidayCode(String rawCode, long rowidFallback) {
+        if (rawCode != null && !rawCode.trim().isEmpty()) {
+            String c = rawCode.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9_]", "_");
+            if (!c.isEmpty()) {
+                return c.length() <= 63 ? c : c.substring(0, 63);
             }
+        }
+        return "DOL_" + rowidFallback;
+    }
+
+    /** Ligne catalogue Dolibarr {@code llx_c_holiday_types}. */
+    private record HolidayJdbcTypeRow(long rowid, String code, String label, Integer delay, Integer activeFlag) {
+    }
+
+    private boolean updateHolidayUserBalanceJdbc(Long fkUserDolibarr, Long fkType, double qtyAvailable) {
+        if (fkUserDolibarr == null || fkType == null) {
+            return false;
+        }
+        String tbl = qualifiedDolibarrTableName("holiday_users");
+        try {
+            String sql = "UPDATE `" + tbl + "` SET nb_holiday = ? WHERE fk_user = ? AND fk_type = ?";
+            int n = jdbcTemplate.update(sql, qtyAvailable, fkUserDolibarr, fkType);
+            return n > 0;
+        } catch (Exception ex) {
+            log.warn(
+                    "UPDATE {} (nb_holiday) fk_user={}, fk_type={} : {}",
+                    tbl,
+                    fkUserDolibarr,
+                    fkType,
+                    ex.getMessage());
+            return false;
         }
     }
 
@@ -630,23 +948,37 @@ public class DolibarrService {
             return false;
         }
 
+        Long allocationRemoteId = allocation.getDolibarrAllocationId();
+
         Map<String, Object> payload = new HashMap<>();
         payload.put("qty_used", nextUsed);
         payload.put("qty_available", nextAvailable);
 
-        boolean updated = callWithRetry(
-                "LEAVE_ALLOCATION",
-                "CONSUME",
-                demande.getId(),
-                allocation.getDolibarrAllocationId(),
-                payload,
-                () -> {
-                    String url = dolibarrUrl + "/leaves/allocations/" + allocation.getDolibarrAllocationId();
-                    HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, createHeaders());
-                    ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.PUT, entity, Map.class);
-                    return response.getStatusCode().is2xxSuccessful();
-                }
-        );
+        boolean updated;
+        if (allocationRemoteId != null && allocationRemoteId < 0) {
+            updated =
+                    updateHolidayUserBalanceJdbc(
+                            demande.getUser().getDolibarrId(),
+                            allocation.getLeaveType().getDolibarrLeaveTypeId(),
+                            nextAvailable);
+        } else {
+            updated =
+                    callWithRetry(
+                            "LEAVE_ALLOCATION",
+                            "CONSUME",
+                            demande.getId(),
+                            allocationRemoteId,
+                            payload,
+                            () -> {
+                                String url =
+                                        dolibarrUrl + "/leaves/allocations/" + allocationRemoteId;
+                                HttpEntity<Map<String, Object>> entity =
+                                        new HttpEntity<>(payload, createHeaders());
+                                ResponseEntity<Map> response =
+                                        restTemplate.exchange(url, HttpMethod.PUT, entity, Map.class);
+                                return response.getStatusCode().is2xxSuccessful();
+                            });
+        }
 
         if (updated) {
             allocation.setJoursUtilises(nextUsed);
@@ -677,10 +1009,26 @@ public class DolibarrService {
         String code = leaveType.getCode() == null ? "" : leaveType.getCode().toUpperCase(java.util.Locale.ROOT);
         String label = leaveType.getLibelle() == null ? "" : leaveType.getLibelle().toLowerCase(java.util.Locale.ROOT);
         return switch (typeConge) {
-            case PAYE -> code.contains("CONGES_PAYES") || code.equals("CP") || label.contains("pay");
+            case PAYE ->
+                    code.contains("CONGES_PAYES")
+                            || code.equals("CP")
+                            || code.contains("ANNUAL")
+                            || code.contains("VACATION")
+                            || label.contains("pay")
+                            || label.contains("annual")
+                            || label.contains("vacan");
             case COURTE_DUREE -> code.contains("RTT") || label.contains("courte");
-            case MALADIE -> code.contains("MALADIE") || label.contains("malad");
-            case SANS_SOLDE -> code.contains("SANS_SOLDE") || label.contains("sans solde");
+            case MALADIE ->
+                    code.contains("MALADIE")
+                            || code.contains("SICK")
+                            || label.contains("malad")
+                            || label.contains("sick");
+            case SANS_SOLDE ->
+                    code.contains("SANS_SOLDE")
+                            || code.contains("NOPAID")
+                            || code.contains("UNPAID")
+                            || label.contains("sans solde")
+                            || label.contains("unpaid");
         };
     }
 
@@ -882,11 +1230,24 @@ public class DolibarrService {
     }
 
     /**
-     * Vérifie si Dolibarr est configuré
+     * Vérifie si Dolibarr est configuré (URL + clé API).
      */
     private boolean isDolibarrConfigured() {
         return dolibarrUrl != null && !dolibarrUrl.isEmpty() &&
                dolibarrApiKey != null && !dolibarrApiKey.isEmpty();
+    }
+
+    /** Exposé aux services métier (soldes et validation alignés Dolibarr). */
+    public boolean isDolibarrConnectionConfigured() {
+        return isDolibarrConfigured();
+    }
+
+    /**
+     * Lorsque vrai : les quotas affichés / contrôlés doivent refléter les allocations synchronisées Dolibarr pour cet utilisateur,
+     * et la consommation définitive se fait dans la BD Dolibarr à l’approbation.
+     */
+    public boolean isLeaveBalanceFromDolibarr(UserEntity user) {
+        return user != null && user.getDolibarrId() != null && isDolibarrConfigured();
     }
 
     /**

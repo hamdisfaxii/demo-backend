@@ -12,6 +12,7 @@ import com.example.conges.repository.WorkScheduleDayRepository;
 import com.example.conges.repository.WorkScheduleSettingRepository;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -25,6 +26,8 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @RequiredArgsConstructor
 public class HrWorkScheduleService {
+
+    private final CountryPolicyService countryPolicyService;
 
     public static final String NORMAL = "NORMAL";
     public static final String SUMMER = "SUMMER";
@@ -99,6 +102,9 @@ public class HrWorkScheduleService {
             throw new IllegalArgumentException("L'heure de fin doit être supérieure à l'heure de début.");
         }
         LocalDate date = request.getDateDebut();
+        if (date == null) {
+            throw new IllegalArgumentException("La date de la permission est obligatoire.");
+        }
         int dayKey = date.getDayOfWeek().getValue() % 7; // dimanche -> 0
 
         String country = normalizeCountry(user.getPays());
@@ -108,9 +114,19 @@ public class HrWorkScheduleService {
                 .filter(r -> r.getDayOfWeek() == dayKey)
                 .findFirst()
                 .orElse(null);
-        if (row == null || !isWithin(row.getFirstStart(), row.getFirstEnd(), start, end)
-                && !isWithin(row.getSecondStart(), row.getSecondEnd(), start, end)) {
+        if (row == null
+                || (!isWithin(row.getFirstStart(), row.getFirstEnd(), start, end)
+                        && !isWithin(row.getSecondStart(), row.getSecondEnd(), start, end))) {
             throw new IllegalArgumentException("Permission hors horaires autorisés pour ce jour.");
+        }
+
+        String paysMetier = countryPolicyService.normalizeBusinessCountry(user.getPays());
+        if (!"FR".equals(paysMetier)) {
+            long mins = ChronoUnit.MINUTES.between(start, end);
+            if (mins != CountryPolicyService.NON_FR_SHORT_LEAVE_MINUTES) {
+                throw new IllegalArgumentException(
+                        "Hors France, la durée autorisée pour une autorisation courte est exactement 2 heures.");
+            }
         }
     }
 

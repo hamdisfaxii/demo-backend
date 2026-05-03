@@ -6,6 +6,7 @@ import com.example.conges.dto.hr.HrLeaveRequestResponse;
 import com.example.conges.entity.UserEntity;
 import com.example.conges.service.HrDecisionService;
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.validation.Valid;
@@ -23,12 +24,40 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("/api/hr/requests")
+@RequestMapping({ "/api/rh/requests", "/api/hr/requests" })
 @RequiredArgsConstructor
 @PreAuthorize("hasAnyRole('RH','ADMIN')")
 public class HrDecisionController {
 
     private final HrDecisionService hrDecisionService;
+
+    /**
+     * Liste / historique (tous statuts, filtrables) — même chemin que le mock {@code /api/rh/requests}.
+     */
+    @GetMapping
+    public ResponseEntity<Map<String, Object>> list(
+            @AuthenticationPrincipal UserEntity actor,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String employee,
+            @RequestParam(required = false) String country,
+            @RequestParam(required = false) String department,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate
+    ) {
+        List<HrLeaveRequestResponse> requests = hrDecisionService.getHistoryRequests(
+                actor,
+                status,
+                employee,
+                country,
+                department,
+                startDate,
+                endDate
+        );
+        Map<String, Object> body = new HashMap<>();
+        body.put("requests", requests);
+        body.put("total", requests.size());
+        return ResponseEntity.ok(body);
+    }
 
     @GetMapping("/pending")
     public ResponseEntity<List<HrLeaveRequestResponse>> getPending(

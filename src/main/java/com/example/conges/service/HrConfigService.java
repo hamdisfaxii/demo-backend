@@ -1,11 +1,20 @@
 package com.example.conges.service;
 
+import com.example.conges.config.FranceRttProperties;
+import com.example.conges.dto.config.EmployeeContractRhPatchRequest;
+import com.example.conges.dto.config.FranceRttSettingsDto;
 import com.example.conges.dto.config.LeaveTypeConfigRequest;
 import com.example.conges.entity.CountryLeavePolicy;
 import com.example.conges.entity.ExceptionalLeaveConfig;
+import com.example.conges.entity.FranceRttSettings;
 import com.example.conges.entity.LeaveType;
+import com.example.conges.entity.UserEntity;
 import com.example.conges.repository.ExceptionalLeaveConfigRepository;
 import com.example.conges.repository.LeaveTypeRepository;
+import com.example.conges.repository.UserRepository;
+import java.time.LocalDate;
+import java.time.Year;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.persistence.EntityNotFoundException;
@@ -21,6 +30,9 @@ public class HrConfigService {
     private final LeaveTypeRepository leaveTypeRepository;
     private final ExceptionalLeaveConfigRepository exceptionalLeaveConfigRepository;
     private final DolibarrService dolibarrService;
+    private final FranceRttLedgerService franceRttLedgerService;
+    private final FranceRttProperties franceRttProperties;
+    private final UserRepository userRepository;
 
     @Transactional(readOnly = true)
     public List<CountryLeavePolicy> getCountryPolicies() {
@@ -103,5 +115,63 @@ public class HrConfigService {
             existing.setEnabled(payload.getEnabled());
         }
         return exceptionalLeaveConfigRepository.save(existing);
+    }
+
+    @Transactional(readOnly = true)
+    public FranceRttSettingsDto getFranceRttSettings() {
+        FranceRttSettings s = franceRttLedgerService.resolvedSettingsSnapshot();
+        FranceRttSettingsDto dto = new FranceRttSettingsDto();
+        dto.setAccrualMode(s.getAccrualMode());
+        dto.setAdminOverrideDays(s.getAdminOverrideDays());
+        dto.setUpdatedAt(s.getUpdatedAt());
+        return dto;
+    }
+
+    public Map<String, Object> franceRttFeatureFlags() {
+        Map<String, Object> meta = new HashMap<>();
+        meta.put("localLedgerEnabled", franceRttProperties.isLocalLedgerEnabled());
+        meta.put("skipDolibarrRttConsume", franceRttProperties.isSkipDolibarrRttConsume());
+        return meta;
+    }
+
+    @Transactional
+    public FranceRttSettingsDto upsertFranceRttSettings(FranceRttSettingsDto body) {
+        franceRttLedgerService.upsertGlobalSettings(
+                body.getAccrualMode(), body.getAdminOverrideDays());
+        return getFranceRttSettings();
+    }
+
+    /**
+     * Ajustements contrat (RTT FR notamment). Resynchronise le cache SQL lorsque pertinent.
+     */
+    @Transactional
+    public UserEntity patchEmployeeContract(Long employeeId, EmployeeContractRhPatchRequest request) {
+        UserEntity user = userRepository.findById(employeeId)
+                .orElseThrow(() -> new EntityNotFoundException("Employé introuvable"));
+        if (request.getWeeklyHours() != null) {
+            user.setWeeklyHours(request.getWeeklyHours());
+        }
+        if (request.getAnnualWorkDays() != null) {
+            user.setAnnualWorkDays(request.getAnnualWorkDays());
+        }
+        if (request.getContractType() != null) {
+            user.setContractType(request.getContractType().trim());
+        }
+        if (request.getContractActive() != null) {
+            user.setContractActive(Boolean.TRUE.equals(request.getContractActive()));
+        }
+        if (request.getCountryCode() != null && !request.getCountryCode().isBlank()) {
+            user.setCountryCode(request.getCountryCode().trim().toUpperCase());
+        }
+        userRepository.save(user);
+        try {
+            if (franceRttLedgerService.usesPersistedFranceRttLedger(user)) {
+                franceRttLedgerService.refreshPersistedTotals(
+                        employeeId, Year.now().getValue(), LocalDate.now());
+            }
+        } catch (RuntimeException ignored) {
+            // Profils hors périmètre (>35 h) ou seed incomplet ; projection GET recalculera.
+        }
+        return user;
     }
 }

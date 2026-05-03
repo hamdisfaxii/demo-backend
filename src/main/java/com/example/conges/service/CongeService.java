@@ -17,14 +17,21 @@ import com.example.conges.repository.JoursPrisParTypeProjection;
 import com.example.conges.repository.LeaveTypeRepository;
 import com.example.conges.repository.UserRepository;
 import javax.persistence.EntityNotFoundException;
+import java.text.Normalizer;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.Year;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import org.springframework.util.StringUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,34 +59,98 @@ public class CongeService {
     private final EmployeeLeaveAllocationRepository employeeLeaveAllocationRepository;
     private final LeaveTypeRepository leaveTypeRepository;
     private final HrWorkScheduleService hrWorkScheduleService;
+    private final HourlyLeaveCapEvaluator hourlyLeaveCapEvaluator;
+    private final FranceRttLedgerService franceRttLedgerService;
 
     @Transactional
     public DemandeCongeResponse creerDemande(Long userId, DemandeCongeRequest request) {
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new EntityNotFoundException("Utilisateur introuvable"));
+        TypeConge type = request.getTypeConge();
+        String paysNorm = countryPolicyService.normalizeBusinessCountry(user.getPays());
+        boolean fr = "FR".equals(paysNorm);
+
+        if (type == TypeConge.COURTE_DUREE && !request.isDemandeSortieCourte()) {
+            throw new IllegalArgumentException(
+                    "Ce type de demande doit être créé depuis l'écran « Autorisation courte ».");
+        }
 
         if (request.getDateFin().isBefore(request.getDateDebut())) {
             throw new IllegalArgumentException("La date de fin doit être après ou égale à la date de début");
         }
 
-        int joursOuvrables = calculerJoursOuvrables(request.getDateDebut(), request.getDateFin());
-        if (joursOuvrables <= 0) {
-            throw new IllegalArgumentException("Aucun jour ouvrable dans la période choisie");
+        if (type == TypeConge.COURTE_DUREE && fr && !countryPolicyService.isRttEnabledForCountry(user.getPays())) {
+            throw new IllegalArgumentException("Les autorisations courtes sont désactivées pour votre pays.");
         }
 
-        hrWorkScheduleService.validatePermissionWithinWorkingHours(user, request);
+        DemandeConge demande;
 
-        verifierSoldeDisponible(userId, request.getTypeConge(), joursOuvrables);
+        if (type == TypeConge.COURTE_DUREE) {
+            hrWorkScheduleService.validatePermissionWithinWorkingHours(user, request);
+            LocalTime hd = request.getHeureDebut();
+            LocalTime hf = request.getHeureFin();
+            if (!fr) {
+                if (!request.getDateDebut().equals(request.getDateFin())) {
+                    throw new IllegalArgumentException(
+                            "Une autorisation courte hors France doit porter sur une seule journée.");
+                }
+                hourlyLeaveCapEvaluator.assertMonthlyCapForNewRequest(
+                        userId, request.getDateDebut(), user.getPays());
+                int mins = DemandeConge.minutesBetween(hd, hf);
+                if (mins != CountryPolicyService.NON_FR_SHORT_LEAVE_MINUTES) {
+                    throw new IllegalArgumentException(
+                            "Durée invalide : %d minutes (exactement %d minutes attendues)."
+                                    .formatted(mins, CountryPolicyService.NON_FR_SHORT_LEAVE_MINUTES));
+                }
+                demande = DemandeConge.builder()
+                        .user(user)
+                        .typeConge(TypeConge.COURTE_DUREE)
+                        .dateDebut(request.getDateDebut())
+                        .dateFin(request.getDateFin())
+                        .nombreJours(0)
+                        .motif(request.getMotif())
+                        .statut(StatutConge.EN_ATTENTE)
+                        .permissionHeureDebut(hd)
+                        .permissionHeureFin(hf)
+                        .dureePermissionMinutes(mins)
+                        .build();
+            } else {
+                int joursOuvrables = calculerJoursOuvrables(request.getDateDebut(), request.getDateFin());
+                if (joursOuvrables <= 0) {
+                    throw new IllegalArgumentException("Aucun jour ouvrable dans la période choisie");
+                }
+                verifierSoldeDisponible(userId, TypeConge.COURTE_DUREE, joursOuvrables);
+                demande = DemandeConge.builder()
+                        .user(user)
+                        .typeConge(TypeConge.COURTE_DUREE)
+                        .dateDebut(request.getDateDebut())
+                        .dateFin(request.getDateFin())
+                        .nombreJours(joursOuvrables)
+                        .motif(request.getMotif())
+                        .statut(StatutConge.EN_ATTENTE)
+                        .permissionHeureDebut(hd)
+                        .permissionHeureFin(hf)
+                        .dureePermissionMinutes(null)
+                        .build();
+            }
+        } else {
+            int joursOuvrables = calculerJoursOuvrables(request.getDateDebut(), request.getDateFin());
+            if (joursOuvrables <= 0) {
+                throw new IllegalArgumentException("Aucun jour ouvrable dans la période choisie");
+            }
+            verifierSoldeDisponible(userId, type, joursOuvrables);
 
-        DemandeConge demande = DemandeConge.builder()
-                .user(user)
-                .typeConge(request.getTypeConge())
-                .dateDebut(request.getDateDebut())
-                .dateFin(request.getDateFin())
-                .nombreJours(joursOuvrables)
-                .motif(request.getMotif())
-                .statut(StatutConge.EN_ATTENTE)
-                .build();
+            demande = DemandeConge.builder()
+                    .user(user)
+                    .typeConge(type)
+                    .dateDebut(request.getDateDebut())
+                    .dateFin(request.getDateFin())
+                    .nombreJours(joursOuvrables)
+                    .motif(request.getMotif())
+                    .statut(StatutConge.EN_ATTENTE)
+                    .build();
+        }
+
         workflowService.initializeWorkflow(demande);
 
         DemandeConge saved = demandeCongeRepository.save(demande);
@@ -90,10 +161,9 @@ public class CongeService {
             historyService.recordDolibarrSync(user, saved, "OUTBOUND_CREATED");
         }
         log.info("Demande de congé créée id={} pour userId={}", saved.getId(), userId);
-        
-        // Enregistrer dans l'historique
+
         historyService.recordCreation(user, saved);
-        
+
         return toResponse(saved);
     }
 
@@ -132,6 +202,97 @@ public class CongeService {
                 .toList();
     }
 
+    /**
+     * Liste des demandes pour l’historique employé avec filtres (année civile intersectée ; statut).
+     * Les paramètres {@code statutRaw} correspondent aux valeurs envoyées par le frontend (accordée, attente…).
+     */
+    @Transactional(readOnly = true)
+    public List<DemandeCongeResponse> getMesDemandesFiltrees(
+            Long userId,
+            Integer annee,
+            String statutRaw) {
+        return getMesDemandes(userId).stream()
+                .filter(d -> filtreDemandeIntersecteAnnee(d, annee))
+                .filter(d -> filtreDemandePourStatutParam(d.getStatut(), statutRaw))
+                .toList();
+    }
+
+    private static boolean filtreDemandeIntersecteAnnee(DemandeCongeResponse d, Integer annee) {
+        if (annee == null || annee < 1970 || annee > 2100) {
+            return true;
+        }
+        LocalDate debut = d.getDateDebut();
+        LocalDate fin = d.getDateFin();
+        if (debut == null || fin == null) {
+            return false;
+        }
+        LocalDate yStart = LocalDate.of(annee, 1, 1);
+        LocalDate yEnd = LocalDate.of(annee, 12, 31);
+        return !fin.isBefore(yStart) && !debut.isAfter(yEnd);
+    }
+
+    private static boolean filtreDemandePourStatutParam(
+            StatutConge demandeStatut,
+            String statutRaw) {
+        return parseStatutFiltreListe(statutRaw)
+                .map(s -> demandeStatut == s)
+                .orElse(true);
+    }
+
+    /**
+     * @return vide si aucun filtre ({@code tous} ou blanc), sinon statut métier correspondant au libellé API.
+     */
+    private static Optional<StatutConge> parseStatutFiltreListe(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Optional.empty();
+        }
+        String n = Normalizer.normalize(raw, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "")
+                .toLowerCase(Locale.ROOT)
+                .trim()
+                .replace('-', '_');
+        if ("tous".equals(n)) {
+            return Optional.empty();
+        }
+        if (Set.of(
+                        "attente",
+                        "en_attente",
+                        "enattente",
+                        "pending")
+                .contains(n)) {
+            return Optional.of(StatutConge.EN_ATTENTE);
+        }
+        if (Set.of(
+                        "validee",
+                        "accordee",
+                        "accepted",
+                        "accepte",
+                        "approved")
+                .contains(n)) {
+            return Optional.of(StatutConge.ACCEPTE);
+        }
+        if (Set.of(
+                        "refusee",
+                        "refuse",
+                        "rejected")
+                .contains(n)) {
+            return Optional.of(StatutConge.REFUSE);
+        }
+        if (Set.of(
+                        "annulee",
+                        "annule",
+                        "canceled",
+                        "cancelled")
+                .contains(n)) {
+            return Optional.of(StatutConge.ANNULE);
+        }
+        try {
+            return Optional.of(StatutConge.valueOf(raw.trim().toUpperCase(Locale.ROOT)));
+        } catch (IllegalArgumentException ignored) {
+            return Optional.empty();
+        }
+    }
+
     @Transactional(readOnly = true)
     public List<DemandeCongeResponse> getHistorique(Long userId) {
         if (!userRepository.existsById(userId)) {
@@ -149,28 +310,52 @@ public class CongeService {
                 .orElseThrow(() -> new EntityNotFoundException("Utilisateur introuvable"));
 
         int annee = Year.now().getValue();
-        // Best effort inbound sync before read; local DB remains tracking/audit storage.
-        dolibarrService.refreshAllocationsForUser(user, annee);
-        List<EmployeeLeaveAllocation> allocations =
-                employeeLeaveAllocationRepository.findAllAllocationsForYear(user, annee);
-
-        Map<String, EmployeeLeaveAllocation> byCode = new java.util.HashMap<>();
-        for (EmployeeLeaveAllocation row : allocations) {
-            LeaveType leaveType = row.getLeaveType();
-            if (leaveType != null && leaveType.getCode() != null) {
-                byCode.put(leaveType.getCode().toUpperCase(java.util.Locale.ROOT), row);
-            }
-        }
+        Map<String, EmployeeLeaveAllocation> byCode = buildAllocationCodeIndex(user, annee);
 
         List<SoldeCongeResponse> result = new ArrayList<>();
         for (TypeConge type : TypeConge.values()) {
+            if (type == TypeConge.COURTE_DUREE
+                    && countryPolicyService.isRttEnabledForCountry(user.getPays())
+                    && franceRttLedgerService.isFranceRttTrackedForUi(user)
+                    && franceRttLedgerService.isLocalLedgerActive()) {
+                LocalDate au = LocalDate.now();
+                Map<String, Object> snap = franceRttLedgerService.ledgerSnapshot(user, annee, au);
+                if (!snap.isEmpty()) {
+                    Number totNum = Optional.ofNullable((Number) snap.get("rtt_total")).orElse(0);
+                    Number useNum = Optional.ofNullable((Number) snap.get("rtt_used")).orElse(0);
+                    Number remNum = Optional.ofNullable((Number) snap.get("rtt_remaining")).orElse(0);
+                    double tot = totNum.doubleValue();
+                    double use = useNum.doubleValue();
+                    double rem = remNum.doubleValue();
+                    result.add(SoldeCongeResponse.builder()
+                            .typeConge(type)
+                            .totalJours((int) Math.round(tot))
+                            .joursPris((int) Math.round(use))
+                            .joursRestants((int) Math.floor(rem))
+                            .totalExact(tot)
+                            .prisExact(use)
+                            .restantsExact(rem)
+                            .build());
+                    continue;
+                }
+            }
+
+            if (type == TypeConge.COURTE_DUREE && !countryPolicyService.isRttEnabledForCountry(user.getPays())) {
+                result.add(SoldeCongeResponse.builder()
+                        .typeConge(type)
+                        .totalJours(0)
+                        .joursPris(0)
+                        .joursRestants(0)
+                        .build());
+                continue;
+            }
             EmployeeLeaveAllocation a = findAllocationByType(type, byCode);
             if (a != null) {
                 result.add(SoldeCongeResponse.builder()
                         .typeConge(type)
-                        .totalJours(a.getJoursInitiaux().intValue())
-                        .joursPris(a.getJoursUtilises().intValue())
-                        .joursRestants(a.getJoursDisponibles().intValue())
+                        .totalJours(safeDays(a.getJoursInitiaux()))
+                        .joursPris(safeDays(a.getJoursUtilises()))
+                        .joursRestants(safeDays(a.getJoursDisponibles()))
                         .build());
             } else {
                 // Fallback: si pas d'allocation existante, renvoyer 0 (ou quota pays si tu préfères)
@@ -187,6 +372,130 @@ public class CongeService {
     }
 
     /**
+     * Réponse enrichie compatible frontend (soldes CP / courte durée / maladie, etc.).
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> getSoldeResponseMap(Long userId) {
+        UserEntity principal = userRepository.findById(userId)
+                .orElseThrow(() -> new EntityNotFoundException("Utilisateur introuvable"));
+        List<SoldeCongeResponse> soldes = calculerSolde(userId);
+        return buildSoldeApiMap(principal, soldes);
+    }
+
+    private Map<String, Object> buildSoldeApiMap(UserEntity user, List<SoldeCongeResponse> soldes) {
+        int paye = joursRestantsEnum(soldes, TypeConge.PAYE);
+        boolean fr = "FR".equals(countryPolicyService.normalizeBusinessCountry(user.getPays()));
+        int courte =
+                soldeBlocPourType(soldes, TypeConge.COURTE_DUREE)
+                        .filter(bl -> bl.getRestantsExact() != null)
+                        .map(bl -> (int) Math.floor(bl.getRestantsExact()))
+                        .orElseGet(
+                                () ->
+                                        countryPolicyService.isRttEnabledForCountry(user.getPays())
+                                                ? joursRestantsEnum(soldes, TypeConge.COURTE_DUREE)
+                                                : 0);
+        int sans = joursRestantsEnum(soldes, TypeConge.SANS_SOLDE);
+
+        final boolean dolibarrCommeReferentielSoldes =
+                dolibarrService.isLeaveBalanceFromDolibarr(user);
+        final int mal;
+        final int malQuota;
+        final boolean maladieNonDecompte;
+        final String messageMaladie;
+        if (dolibarrCommeReferentielSoldes) {
+            mal = Math.max(0, joursRestantsEnum(soldes, TypeConge.MALADIE));
+            malQuota = soldeBlocPourType(soldes, TypeConge.MALADIE)
+                    .map(SoldeCongeResponse::getTotalJours)
+                    .orElse(mal);
+            maladieNonDecompte = false;
+            /*
+             * 0 jour = valeur Dolibarr (pas un calcul automatique pays dans l’app). Souvent : pas de ligne d’allocation
+             * pour un type relié comme « maladie », pas de fk_user Dolibarr, ou solde vraiment à 0.
+             */
+            messageMaladie =
+                    mal <= 0
+                            ? "Congé maladie : valeur lue depuis Dolibarr uniquement. Si elle reste à 0 : vérifiez qu’un type congé maladie existe, qu’il est synchronisé, et que l’employé a bien une allocation (nb jours disponibles)."
+                            : "";
+        } else {
+            malQuota = countryPolicyService.getAnnualQuota(user.getPays(), TypeConge.MALADIE);
+            maladieNonDecompte = malQuota <= 0;
+            int prisMal = compterJoursPrisOuReservesPourType(user.getId(), TypeConge.MALADIE);
+            mal = maladieNonDecompte ? 0 : Math.max(0, malQuota - prisMal);
+            messageMaladie =
+                    maladieNonDecompte
+                            ? "Congé maladie : suivi hors quota décompté dans l’application (consultez vos règles RH)."
+                            : "";
+        }
+
+        Map<String, Object> m = new HashMap<>();
+        m.put("soldeCongesPayes", paye);
+        soldeBlocPourType(soldes, TypeConge.COURTE_DUREE)
+                .map(SoldeCongeResponse::getRestantsExact)
+                .ifPresent(re -> {
+                    if (countryPolicyService.isRttEnabledForCountry(user.getPays())) {
+                        m.put("soldeCourteDureeExact", re);
+                    }
+                });
+
+        Map<String, Object> frRt = Collections.emptyMap();
+        if (franceRttLedgerService.isFranceRttTrackedForUi(user)) {
+            frRt = franceRttLedgerService.ledgerSnapshot(user, java.time.Year.now().getValue(), LocalDate.now());
+        }
+        if (!frRt.isEmpty()) {
+            m.put("franceRtt", new HashMap<>(frRt));
+        }
+
+        m.put("soldeCourteDuree", courte);
+        m.put("soldePermission", courte);
+        m.put("soldeMaladie", mal);
+        m.put("soldeSansSolde", sans);
+        m.put("maladieQuotaReference", malQuota);
+        m.put("maladieNonDecompte", maladieNonDecompte);
+        m.put("messageMaladie", messageMaladie);
+
+        if (!fr) {
+            LocalDate moisCourant = LocalDate.now();
+            LocalDate mDeb = moisCourant.withDayOfMonth(1);
+            LocalDate mFin = moisCourant.withDayOfMonth(moisCourant.lengthOfMonth());
+            long utiliseesOuAttente =
+                    demandeCongeRepository.countShortHourlyLeavesInMonthForStatuses(
+                            user.getId(),
+                            EnumSet.of(StatutConge.ACCEPTE, StatutConge.EN_ATTENTE),
+                            mDeb,
+                            mFin);
+            long acceptees =
+                    demandeCongeRepository.countShortHourlyLeavesInMonthForStatus(
+                            user.getId(), StatutConge.ACCEPTE, mDeb, mFin);
+            int cap = CountryPolicyService.NON_FR_SHORT_LEAVE_MONTHLY_CAP;
+            m.put("autorisationsCourtesMoisMaximum", cap);
+            m.put("autorisationsCourtesMoisUtilisees", (int) utiliseesOuAttente);
+            m.put("autorisationsCourtesMoisAcceptees", (int) acceptees);
+            m.put(
+                    "autorisationsCourtesMoisRestantes",
+                    Math.max(0, cap - (int) utiliseesOuAttente));
+        }
+
+        Double totalAlloc =
+                employeeLeaveAllocationRepository.getTotalJoursDisponibles(user, java.time.Year.now().getValue());
+        int soldeTotalTousTypes = totalAlloc == null ? 0 : Math.max(0, (int) Math.round(totalAlloc));
+
+        m.put("soldeTotalTousTypes", soldeTotalTousTypes);
+
+        m.put("solde", paye);
+        m.put("details", soldes);
+
+        return m;
+    }
+
+    private static int joursRestantsEnum(List<SoldeCongeResponse> soldes, TypeConge t) {
+        return soldes.stream()
+                .filter(s -> s.getTypeConge() == t)
+                .findFirst()
+                .map(SoldeCongeResponse::getJoursRestants)
+                .orElse(0);
+    }
+
+    /**
      * Compte les jours ouvrables entre deux dates inclusives.
      * Exclut le samedi et le dimanche. Les jours fériés ne sont pas pris en compte pour l'instant
      * (évolution prévue avec la gestion multi-pays).
@@ -197,8 +506,11 @@ public class CongeService {
 
     /**
      * Vérifie que l'utilisateur dispose d'assez de jours pour le type de congé demandé.
-     * Les jours déjà pris ou réservés (demandes {@link StatutConge#ACCEPTE} ou {@link StatutConge#EN_ATTENTE})
-     * sont déduits du plafond applicable.
+     * <p>Si Dolibarr est lié ({@link DolibarrService#isLeaveBalanceFromDolibarr}) : quota = solde disponible lu
+     * après synchro allocations, diminué des autres demandes {@link StatutConge#EN_ATTENTE} dans cette appli ;
+     * les validations acceptées ont déjà réduit Dolibarr à l’approbation.</p>
+     * <p>Sinon (hors Dolibarr) : plafonds pays dans l’appli avec prise en compte des demandes
+     * {@link StatutConge#ACCEPTE} ou {@link StatutConge#EN_ATTENTE}.</p>
      */
     @Transactional(readOnly = true)
     public void verifierSoldeDisponible(Long userId, TypeConge type, int joursDemandes) {
@@ -208,33 +520,149 @@ public class CongeService {
             throw new IllegalArgumentException("Le nombre de jours demandés doit être strictement positif");
         }
 
-        switch (type) {
-            case MALADIE, SANS_SOLDE -> {
+        if (type == TypeConge.SANS_SOLDE) {
+            return;
+        }
+
+        if (type == TypeConge.COURTE_DUREE
+                && "FR".equals(countryPolicyService.normalizeBusinessCountry(user.getPays()))
+                && countryPolicyService.isRttEnabledForCountry(user.getPays())) {
+            if (!user.isContractActive()) {
+                throw new IllegalStateException(
+                        "Contrat suspendu : aucune autorisation courte (RTT) ne peut être prise tant que le contrat n’est pas réactivé.");
+            }
+            if (franceRttLedgerService.governsFranceCourteRequests(user)) {
+                franceRttLedgerService.assertSufficientFranceCourte(
+                        user, Year.now().getValue(), LocalDate.now(), joursDemandes);
                 return;
             }
+        }
+
+        /*
+         * Lorsque l’utilisateur est lié à Dolibarr et que l’API est configurée, le solde utilisé pour
+         * accepter une demande est celui lu depuis les allocations Dolibarr (avec retrait des autres
+         * demandes déjà « en attente » dans cette appli mais pas encore reflétées côté Dolibarr).
+         * La mise à jour définitive des soldes se fait ensuite dans Dolibarr à l’approbation.
+         */
+        if (dolibarrService.isLeaveBalanceFromDolibarr(user)) {
+            verifierSoldeDepuisAllocationDolibarr(user, type, joursDemandes);
+            return;
+        }
+
+        switch (type) {
             case PAYE -> {
                 int prisOuReserve = compterJoursPrisOuReservesPourType(userId, TypeConge.PAYE);
-                int restants = countryPolicyService.getAnnualQuota(user.getPays(), TypeConge.PAYE) - prisOuReserve;
+                int ceiling = countryPolicyService.getPaidLeaveEntitlementCeilingForYear(user, Year.now().getValue());
+                int restants = ceiling - prisOuReserve;
                 if (joursDemandes > restants) {
                     throw new IllegalStateException(String.format(
-                            "Solde de congés payés insuffisant : %d jour(s) ouvrable(s) demandé(s), %d disponible(s)",
+                            "Solde de congés payés insuffisant : %d jour(s) ouvrable(s) demandé(s), %d disponible(s) sur %d (prorata pays)",
                             joursDemandes,
-                            Math.max(0, restants)));
+                            Math.max(0, restants),
+                            ceiling));
                 }
             }
             case COURTE_DUREE -> {
+                if (!countryPolicyService.isRttEnabledForCountry(user.getPays())) {
+                    throw new IllegalArgumentException(
+                            "Les sorties de courte durée ne sont pas disponibles pour votre pays.");
+                }
                 int prisOuReserve = compterJoursPrisOuReservesPourType(userId, TypeConge.COURTE_DUREE);
-                int quota = countryPolicyService.getAnnualQuota(user.getPays(), TypeConge.COURTE_DUREE);
+                int quota = countryPolicyService.getAnnualRttQuota(user.getPays());
                 int restants = quota - prisOuReserve;
                 if (joursDemandes > restants) {
                     throw new IllegalStateException(String.format(
-                            "Solde congé courte durée insuffisant (plafond %d jours) : %d jour(s) demandé(s), %d disponible(s)",
+                            "Solde sortie courte durée insuffisant (plafond %d j.) : %d j. demandé(s), %d disponible(s)",
                             quota,
                             joursDemandes,
                             Math.max(0, restants)));
                 }
             }
+            case MALADIE -> {
+                int quota = countryPolicyService.getAnnualQuota(user.getPays(), TypeConge.MALADIE);
+                if (quota <= 0) {
+                    return;
+                }
+                int prisOuReserve = compterJoursPrisOuReservesPourType(userId, TypeConge.MALADIE);
+                int restants = quota - prisOuReserve;
+                if (joursDemandes > restants) {
+                    throw new IllegalStateException(String.format(
+                            "Plafond annuel congé maladie (%d j.) : %d jour(s) demandé(s), %d disponible(s)",
+                            quota,
+                            joursDemandes,
+                            Math.max(0, restants)));
+                }
+            }
+            case SANS_SOLDE -> {}
         }
+    }
+
+    /** Index des allocations locales (reflétant la dernière synchro Dolibarr) par code métier Dolibarr. */
+    private Map<String, EmployeeLeaveAllocation> buildAllocationCodeIndex(UserEntity user, int year) {
+        try {
+            dolibarrService.refreshAllocationsForUser(user, year);
+        } catch (RuntimeException ex) {
+            log.warn("Sync Dolibarr solde ignorée pour user {} : {}", user.getId(), ex.getMessage());
+        }
+        List<EmployeeLeaveAllocation> allocations =
+                employeeLeaveAllocationRepository.findAllAllocationsForYear(user, year);
+        Map<String, EmployeeLeaveAllocation> byCode = new HashMap<>();
+        for (EmployeeLeaveAllocation row : allocations) {
+            LeaveType leaveType = row.getLeaveType();
+            if (leaveType != null && leaveType.getCode() != null) {
+                byCode.put(leaveType.getCode().toUpperCase(Locale.ROOT), row);
+            }
+        }
+        return byCode;
+    }
+
+    private Optional<SoldeCongeResponse> soldeBlocPourType(List<SoldeCongeResponse> soldes, TypeConge type) {
+        return soldes.stream().filter(s -> s.getTypeConge() == type).findFirst();
+    }
+
+    private void verifierSoldeDepuisAllocationDolibarr(UserEntity user, TypeConge type, int joursDemandes) {
+        if (type == TypeConge.COURTE_DUREE && !countryPolicyService.isRttEnabledForCountry(user.getPays())) {
+            throw new IllegalArgumentException(
+                    "Les sorties de courte durée ne sont pas disponibles pour votre pays.");
+        }
+        int year = Year.now().getValue();
+        Map<String, EmployeeLeaveAllocation> byCode = buildAllocationCodeIndex(user, year);
+        EmployeeLeaveAllocation allocation = findAllocationByType(type, byCode);
+        if (allocation == null) {
+            throw new IllegalStateException(
+                    "Solde Dolibarr introuvable pour ce type de congé. Vérifiez les types harmonisés (CP, RTT, maladie) et la liaison fk_user Dolibarr.");
+        }
+        int disponibleLu = Math.max(0, safeDays(allocation.getJoursDisponibles()));
+        int enAttenteCetteApplication =
+                compterJoursDemandesEnAttenteSeulementPourType(user.getId(), type);
+        int effectifPourNouvelleDemande = Math.max(0, disponibleLu - enAttenteCetteApplication);
+        if (joursDemandes > effectifPourNouvelleDemande) {
+            throw new IllegalStateException(String.format(
+                    "Solde insuffisant (Dolibarr) : %d jour(s) demandé(s), %d jour(s) encore disponibles au regard du solde synchronisé et de vos autres demandes en attente dans l’application.",
+                    joursDemandes,
+                    Math.max(0, effectifPourNouvelleDemande)));
+        }
+    }
+
+    private int compterJoursDemandesEnAttenteSeulementPourType(Long userId, TypeConge type) {
+        List<JoursPrisParTypeProjection> rows = demandeCongeRepository.sumJoursPrisParTypePourUtilisateur(
+                userId, EnumSet.of(StatutConge.EN_ATTENTE));
+        return rows.stream()
+                .filter(r -> r.getTypeConge() == type)
+                .findFirst()
+                .map(r -> r.getTotalJours().intValue())
+                .orElse(0);
+    }
+
+    @Transactional(readOnly = true)
+    public DemandeCongeResponse getDemandeById(Long demandeId, Long currentUserId, Role role) {
+        DemandeConge d = demandeCongeRepository.findById(demandeId)
+                .orElseThrow(() -> new EntityNotFoundException("Demande introuvable"));
+        boolean rh = role == Role.RH || role == Role.ADMIN || role == Role.MANAGER;
+        if (!rh && (d.getUser() == null || !d.getUser().getId().equals(currentUserId))) {
+            throw new AccessDeniedException("Accès refusé à cette demande");
+        }
+        return toResponse(d);
     }
 
     @Transactional
@@ -296,6 +724,13 @@ public class CongeService {
                 .build();
     }
 
+    private static int safeDays(Double value) {
+        if (value == null || value.isNaN()) {
+            return 0;
+        }
+        return (int) Math.round(value);
+    }
+
     private int compterJoursPrisOuReservesPourType(Long userId, TypeConge type) {
         List<JoursPrisParTypeProjection> rows = demandeCongeRepository.sumJoursPrisParTypePourUtilisateur(
                 userId,
@@ -333,10 +768,29 @@ public class CongeService {
             TypeConge typeConge,
             Map<String, EmployeeLeaveAllocation> byCode) {
         List<String> candidates = switch (typeConge) {
-            case PAYE -> List.of("CONGES_PAYES", "PAID_LEAVE", "CP");
+            case PAYE ->
+                    List.of(
+                            "CONGES_PAYES",
+                            "PAID_LEAVE",
+                            "CP",
+                            "ANNUAL_LEAVE",
+                            "VACATION",
+                            "VACANCES");
             case COURTE_DUREE -> List.of("RTT", "COURTE_DUREE", "SHORT_LEAVE");
-            case MALADIE -> List.of("CONGE_MALADIE", "MALADIE", "SICK_LEAVE");
-            case SANS_SOLDE -> List.of("CONGE_SANS_SOLDE", "SANS_SOLDE", "UNPAID_LEAVE");
+            case MALADIE ->
+                    List.of(
+                            "CONGE_MALADIE",
+                            "MALADIE",
+                            "SICK_LEAVE",
+                            "SICKNESS",
+                            "MALADIE_A");
+            case SANS_SOLDE ->
+                    List.of(
+                            "CONGE_SANS_SOLDE",
+                            "SANS_SOLDE",
+                            "UNPAID_LEAVE",
+                            "NOPAID",
+                            "NO_PAID");
         };
         for (String candidate : candidates) {
             EmployeeLeaveAllocation found = byCode.get(candidate);
@@ -357,10 +811,15 @@ public class CongeService {
     private boolean matchesTypeByLabel(TypeConge typeConge, LeaveType leaveType) {
         String raw = (leaveType.getLibelle() + " " + leaveType.getCode()).toLowerCase(java.util.Locale.ROOT);
         return switch (typeConge) {
-            case PAYE -> raw.contains("pay") || raw.contains("cp");
+            case PAYE ->
+                    raw.contains("pay")
+                            || raw.contains("cp")
+                            || raw.contains("annual")
+                            || raw.contains("vacan");
             case COURTE_DUREE -> raw.contains("rtt") || raw.contains("courte");
             case MALADIE -> raw.contains("malad") || raw.contains("sick");
-            case SANS_SOLDE -> raw.contains("sans solde") || raw.contains("unpaid");
+            case SANS_SOLDE ->
+                    raw.contains("sans solde") || raw.contains("unpaid") || raw.contains("non payé");
         };
     }
 }

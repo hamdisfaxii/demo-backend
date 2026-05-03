@@ -5,6 +5,7 @@ import com.example.conges.dto.hr.HrDecisionRequest;
 import com.example.conges.dto.hr.HrLeaveRequestResponse;
 import com.example.conges.entity.DemandeConge;
 import com.example.conges.entity.Role;
+import com.example.conges.entity.StatutConge;
 import com.example.conges.entity.UserEntity;
 import com.example.conges.repository.DemandeCongeRepository;
 import java.time.LocalDate;
@@ -43,6 +44,53 @@ public class HrDecisionService {
                 startDate,
                 endDate
         ).stream().map(this::toHrResponse).toList();
+    }
+
+    /**
+     * Historique RH filtrable (tous statuts ou PENDING/APPROVED/REJECTED côté API).
+     */
+    @Transactional(readOnly = true)
+    public List<HrLeaveRequestResponse> getHistoryRequests(
+            UserEntity actor,
+            String statusFilter,
+            String employee,
+            String country,
+            String department,
+            LocalDate startDate,
+            LocalDate endDate
+    ) {
+        validateHrOrAdmin(actor);
+        String effectiveCountry = resolveCountryFilter(actor, country);
+        StatutConge statut = parseApiStatus(statusFilter);
+        return demandeCongeRepository.findHistoryForHrPanel(
+                statut,
+                normalizeOptional(employee),
+                effectiveCountry,
+                normalizeOptional(department),
+                startDate,
+                endDate
+        ).stream().map(this::toHrResponse).toList();
+    }
+
+    /** null = tous statuts ; accepte synonymes envoyés par le front React. */
+    private StatutConge parseApiStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return null;
+        }
+        String u = status.trim().toUpperCase(Locale.ROOT);
+        if ("ALL".equals(u)) {
+            return null;
+        }
+        if ("PENDING".equals(u) || "EN_ATTENTE".equals(u)) {
+            return StatutConge.EN_ATTENTE;
+        }
+        if ("APPROVED".equals(u) || "ACCEPTE".equals(u) || "ACCEPTED".equals(u)) {
+            return StatutConge.ACCEPTE;
+        }
+        if ("REJECTED".equals(u) || "REFUSE".equals(u) || "REFUS".equals(u)) {
+            return StatutConge.REFUSE;
+        }
+        throw new IllegalArgumentException("Statut filtre invalide: " + status);
     }
 
     @Transactional

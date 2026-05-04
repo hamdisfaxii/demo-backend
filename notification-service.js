@@ -5,6 +5,7 @@
 
 const nodemailer = require("nodemailer");
 const moment = require("moment");
+const dns = require("dns");
 
 function smtpUser() {
   const u = process.env.EMAIL_USER || process.env.MAIL_USERNAME || "";
@@ -13,7 +14,9 @@ function smtpUser() {
 
 function smtpPass() {
   const p = process.env.EMAIL_PASSWORD || process.env.MAIL_PASSWORD || "";
-  return String(p).trim();
+  // Les App Passwords Gmail sont souvent copiés avec des espaces (xxxx xxxx xxxx xxxx).
+  // Nodemailer attend la valeur sans espaces.
+  return String(p).trim().replace(/\s+/g, "");
 }
 
 function isPlaceholderMailConfig() {
@@ -29,19 +32,26 @@ function createSmtpTransporter() {
   const user = smtpUser();
   const pass = smtpPass();
   const host = String(process.env.MAIL_HOST || process.env.SMTP_HOST || "").trim();
-  if (host) {
-    const port = Number(process.env.MAIL_PORT || 587);
-    return nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-    });
-  }
-  return nodemailer.createTransport({
-    service: "gmail",
+  const port = Number(process.env.MAIL_PORT || 587);
+  // Timeouts pour éviter un "verify" qui reste bloqué si le port SMTP est filtré.
+  const base = {
+    host: host || "smtp.gmail.com",
+    port,
+    secure: port === 465,
+    // Certains environnements résolvent smtp.gmail.com en IPv6 et restent bloqués.
+    // Forcer IPv4 rend l’envoi plus fiable en local Windows.
+    family: Number(process.env.MAIL_IP_FAMILY || 4),
     auth: { user, pass },
-  });
+    connectionTimeout: Number(process.env.MAIL_CONNECTION_TIMEOUT_MS || 8000),
+    greetingTimeout: Number(process.env.MAIL_GREETING_TIMEOUT_MS || 8000),
+    socketTimeout: Number(process.env.MAIL_SOCKET_TIMEOUT_MS || 12000),
+  };
+  // STARTTLS explicite sur 587
+  if (port === 587) {
+    base.requireTLS = true;
+    base.tls = { servername: base.host };
+  }
+  return nodemailer.createTransport(base);
 }
 
 function mailFromAddress() {
@@ -51,6 +61,71 @@ function mailFromAddress() {
       smtpUser() ||
       "",
   ).trim();
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
+function parseFallbackIps() {
+  const raw = String(process.env.MAIL_HOST_FALLBACK_IPS || "").trim();
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function resolveHostToIpv4Candidates(hostname) {
+  const h = String(hostname || "").trim();
+  if (!h) return [];
+  // Déjà une IPv4
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return [h];
+
+  const timeoutMs = Number(process.env.MAIL_HOST_RESOLVE_TIMEOUT_MS || 2500);
+  try {
+    const res = await withTimeout(
+      dns.promises.resolve4(h),
+      timeoutMs,
+      `DNS resolve4(${h})`,
+    );
+    return Array.isArray(res) ? res.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function smtpHostCandidates(preferredHost) {
+  const pref = String(preferredHost || "").trim();
+  const fallbackIps = parseFallbackIps();
+  const out = [];
+  const push = (v) => {
+    const s = String(v || "").trim();
+    if (!s) return;
+    if (!out.includes(s)) out.push(s);
+  };
+
+  // 1) Host configuré (peut être un domaine ou une IP)
+  push(pref);
+
+  // 2) Résolution IPv4 (évite queryA ETIMEOUT côté nodemailer)
+  if (pref) {
+    const ips = await resolveHostToIpv4Candidates(pref);
+    ips.forEach(push);
+  }
+
+  // 3) Secours explicite via .env (ex: IPs Gmail)
+  fallbackIps.forEach(push);
+
+  // 4) Valeur par défaut
+  if (!pref) push("smtp.gmail.com");
+
+  return out;
 }
 
 class NotificationService {
@@ -238,18 +313,49 @@ class NotificationService {
         return notification;
       }
 
-      const transport = createSmtpTransporter();
+      const overrideTo = String(process.env.MAIL_TO_OVERRIDE || "").trim();
+      const finalTo = overrideTo || to;
+
       const fromAddr = mailFromAddress() || smtpUser();
-      const info = await transport.sendMail({
-        from: fromAddr,
-        to,
-        subject,
-        html: htmlContent,
-      });
+
+      // Robuste: tenter plusieurs hôtes (domaine + IPs résolues + IPs fallback) si DNS/SMTP instable.
+      const candidates = await smtpHostCandidates(
+        String(process.env.MAIL_HOST || process.env.SMTP_HOST || "").trim(),
+      );
+      let lastErr = null;
+      let info = null;
+
+      for (const h of candidates) {
+        try {
+          // Crée un transport avec l'hôte courant (domaine ou IP)
+          process.env.MAIL_HOST = h;
+          const transport = createSmtpTransporter();
+
+          await withTimeout(transport.verify(), 12000, `SMTP verify (${h})`);
+          info = await withTimeout(
+            transport.sendMail({
+              from: fromAddr,
+              to: finalTo,
+              subject,
+              html: htmlContent,
+            }),
+            20000,
+            `SMTP sendMail (${h})`,
+          );
+          break; // succès
+        } catch (e) {
+          lastErr = e;
+          continue;
+        }
+      }
+
+      if (!info) {
+        throw lastErr || new Error("SMTP send failed (no candidate host succeeded)");
+      }
 
       const notification = {
         id: info.messageId,
-        to,
+        to: finalTo,
         subject,
         status: "SENT",
         timestamp: new Date(),
@@ -258,7 +364,7 @@ class NotificationService {
 
       this.notificationLog.push(notification);
 
-      console.log(`📧 [EMAIL] Envoyé à ${to}`);
+      console.log(`📧 [EMAIL] Envoyé à ${finalTo} (${info.response || "ok"})`);
       return notification;
     } catch (error) {
       console.error(`❌ [EMAIL ERROR]`, error.message);

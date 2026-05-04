@@ -194,6 +194,11 @@ const typesCongePays = {
     CONGES_PAYES: { nom: "Congés Payés", jours: 30, code: "CP" },
     MALADIE: { nom: "Congé Maladie", jours: 7, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 180, code: "PAR" },
+    ARRIVE_AUTORISATION: {
+      nom: "J'arrive — autorisation (retards)",
+      jours: 12,
+      code: "JAR",
+    },
   },
   FR: {
     CONGES_PAYES: { nom: "Congés Payés", jours: 25, code: "CP" },
@@ -206,6 +211,11 @@ const typesCongePays = {
     CONGES_PAYES: { nom: "Congés Payés", jours: 22, code: "CP" },
     MALADIE: { nom: "Congé Maladie", jours: 7, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 120, code: "PAR" },
+    ARRIVE_AUTORISATION: {
+      nom: "J'arrive — autorisation (retards)",
+      jours: 12,
+      code: "JAR",
+    },
   },
 };
 
@@ -374,10 +384,22 @@ async function resolveCountryIsoFromDolibarrSql(dolibarrUserRowid) {
   }
 }
 
+/** Débit RTT (jour) par demande « J'arrive en retard » France (mock). */
+const FR_RETARD_RTT_DEBIT_JOURS = 0.25;
+
+/** Unité débitée sur le solde TN/MA « J'arrive autorisation » par retard (mock). */
+const TNMA_RETARD_AUTORISATION_DEBIT = 1;
+
 /** Aligne les libellés API (CONGE_MALADIE, etc.) sur la clé du registre de soldes mock. */
 function normalizeCongeLedgerKey(typeCongeRaw) {
   const u = String(typeCongeRaw || "").toUpperCase();
   if (u.includes("MALADIE")) return "MALADIE";
+  if (
+    u === "RETARD_DEMAND" ||
+    u.includes("RETARD_DEMAND") ||
+    (u.includes("RETARD") && !u.includes("SORTIE"))
+  )
+    return "RETARD_DEMAND";
   if (
     u === "RTT" ||
     u.includes("RTT") ||
@@ -392,6 +414,15 @@ function normalizeCongeLedgerKey(typeCongeRaw) {
     return "ENFANT_MALADE";
   if (u.includes("SANS_SOLDE")) return "CONGE_SANS_SOLDE";
   return "CONGES_PAYES";
+}
+
+/** À l’approbation RH : registre à débiter pour une demande retard. */
+function retardDebitLedgerKey(paysNorm) {
+  return paysNorm === "FR" ? "SORTIE_COURTE" : "ARRIVE_AUTORISATION";
+}
+
+function retardDebitAmountJours(paysNorm) {
+  return paysNorm === "FR" ? FR_RETARD_RTT_DEBIT_JOURS : TNMA_RETARD_AUTORISATION_DEBIT;
 }
 
 /** Droits maladie annuels selon configur pays (TN/MA : 7 j/an ; FR : 0 = hors carte décompte mock). */
@@ -440,7 +471,7 @@ function minutesBetweenHeures(hd, hf) {
 
 /** Autorisations 2h hors France : compte les demandes actives du mois calendaire courant. */
 function countMockNonFrShortHourlyInMonth(userId, dateDebutStr) {
-  const cap = 3;
+  const cap = 2;
   const fixedMin = 120;
   const d0 = new Date(`${dateDebutStr}T12:00:00`);
   if (Number.isNaN(d0.getTime())) return { utilisees: 0, acceptees: 0, cap };
@@ -470,7 +501,7 @@ function countMockNonFrShortHourlyInMonth(userId, dateDebutStr) {
   return { utilisees, acceptees, cap };
 }
 
-/** Compte uniquement les autorisations 2 h déjà acceptées (pour bloquer une 4e validation). */
+/** Compte uniquement les autorisations 2 h déjà acceptées (pour bloquer après le plafond mensuel). */
 function countAcceptedMockNonFrShortInMonth(userId, dateDebutStr, excludeDemandeId) {
   const fixedMin = 120;
   const d0 = new Date(`${dateDebutStr}T12:00:00`);
@@ -1790,7 +1821,16 @@ app.get("/api/conge/meta/work-schedule", (req, res) => {
 // ============================================
 
 app.post("/api/demande", (req, res) => {
-  const { userId, typeConge, dateDebut, dateFin, raison, heureDebut, heureFin } = req.body;
+  const {
+    userId,
+    typeConge,
+    dateDebut,
+    dateFin,
+    raison,
+    heureDebut,
+    heureFin,
+    heureArrivee,
+  } = req.body;
   const uid = userId != null && userId !== "" ? Number(userId) : NaN;
   if (!Number.isFinite(uid)) {
     return res.status(400).json({
@@ -1811,7 +1851,41 @@ app.post("/api/demande", (req, res) => {
 
   let nombreJours = calculerJoursOuvrables(dateDebut, dateFin, user.pays);
 
-  /** Hors France : autorisation 2 h, plafond 3/mois, sans décompte RTT. */
+  /** J'arrive en retard : pas de blocage horaires type permission ; vérif uniquement soldes avant création */
+  if (ledgerKey === "RETARD_DEMAND") {
+    if (String(dateDebut).trim() !== String(dateFin).trim()) {
+      return res.status(400).json({
+        error: "Un retard doit porter sur une seule date (date début = date fin).",
+      });
+    }
+    const ha =
+      String(heureArrivee || "")
+        .trim()
+        .slice(0, 5) ||
+      String(heureDebut || "")
+        .trim()
+        .slice(0, 5);
+    if (!/^\d{1,2}:\d{2}$/.test(ha)) {
+      return res.status(400).json({
+        error: "Indiquez l’heure d’arrivée prévue pour un retard.",
+      });
+    }
+    nombreJours = 0;
+    const cibleSoldeRetard = retardDebitLedgerKey(paysNorm);
+    const debitRetardPrevu = retardDebitAmountJours(paysNorm);
+    const restSoldeRetard = getSoldeRestantPourLedger(uid, cibleSoldeRetard, user.pays);
+    if (restSoldeRetard + 1e-9 < debitRetardPrevu) {
+      const label =
+        paysNorm === "FR"
+          ? "RTT / sortie courte"
+          : "« J'arrive autorisation » (retards)";
+      return res.status(400).json({
+        error: `Solde insuffisant pour un retard (${label}). Restant : ${Math.max(0, restSoldeRetard)}.`,
+      });
+    }
+  }
+
+  /** Hors France : autorisation 2 h, plafond 2/mois, sans décompte journalier quota ARRIVE. */
   if (ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR") {
     const mins = minutesBetweenHeures(heureDebut, heureFin);
     if (mins !== 120) {
@@ -1822,7 +1896,7 @@ app.post("/api/demande", (req, res) => {
     const { utilisees, cap } = countMockNonFrShortHourlyInMonth(uid, dateDebut);
     if (utilisees >= cap) {
       return res.status(400).json({
-        error: "Limite mensuelle de 3 autorisations courtes atteinte.",
+        error: "Limite mensuelle de 2 autorisations courtes (2 h) atteinte.",
       });
     }
     nombreJours = 0;
@@ -1831,6 +1905,8 @@ app.post("/api/demande", (req, res) => {
   if (!absenceSansDecoteAuSolde(ledgerKey, paysNorm)) {
     if (ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR") {
       /* quota journalier FR uniquement dans le registre mock */
+    } else if (ledgerKey === "RETARD_DEMAND") {
+      /* Débit retard à l’approbation RH, pas à la création */
     } else {
       const soldeRestant = getSoldeRestantPourLedger(userId, ledgerKey, user.pays);
       if (nombreJours > soldeRestant) {
@@ -1841,7 +1917,9 @@ app.post("/api/demande", (req, res) => {
     }
   }
 
-  if (
+  if (ledgerKey === "RETARD_DEMAND") {
+    /* Pas de fenêtre début-fin obligatoire (heure prévue communiquée seule). */
+  } else if (
     ledgerKey === "SORTIE_COURTE" ||
     String(typeConge).toUpperCase() === "RTT"
   ) {
@@ -1861,6 +1939,13 @@ app.post("/api/demande", (req, res) => {
   const dureePermissionMinutes =
     ledgerKey === "SORTIE_COURTE" && paysNorm !== "FR" ? 120 : null;
 
+  const hh =
+    ledgerKey === "RETARD_DEMAND"
+      ? String(heureArrivee || "").trim().slice(0, 5) ||
+        String(heureDebut || "").trim().slice(0, 5) ||
+        null
+      : heureDebut || null;
+
   const nextDemandeId =
     demandes.reduce((m, d) => Math.max(m, Number(d.id) || 0), 0) + 1;
   const newDemande = {
@@ -1869,8 +1954,11 @@ app.post("/api/demande", (req, res) => {
     typeConge,
     dateDebut,
     dateFin,
-    heureDebut: heureDebut || null,
-    heureFin: heureFin || null,
+    heureDebut: hh,
+    heureFin:
+      ledgerKey === "RETARD_DEMAND"
+        ? null
+        : heureFin || null,
     dureePermissionMinutes,
     nombreJours,
     raison,
@@ -2023,9 +2111,9 @@ function handleRhApprove(req, res) {
         demande.dateDebut,
         demande.id,
       );
-      if (dejaAcceptees >= 3) {
+      if (dejaAcceptees >= 2) {
         return res.status(400).json({
-          error: "Limite mensuelle de 3 autorisations courtes atteinte.",
+          error: "Limite mensuelle de 2 autorisations courtes (2 h) atteinte.",
         });
       }
     }
@@ -2042,27 +2130,33 @@ function handleRhApprove(req, res) {
 
   // 📊 MISE À JOUR DU SOLDE DE CONGÉ
   const typeCongeDemande = demande.typeConge;
-  const ledgerKey = normalizeCongeLedgerKey(typeCongeDemande);
-  const nbreJours =
-    ledgerKey === "SORTIE_COURTE" && paysEmployee !== "FR"
+  const logicalLedger = normalizeCongeLedgerKey(typeCongeDemande);
+  let ledgerKeyDebit = logicalLedger;
+  let nbreJours =
+    logicalLedger === "SORTIE_COURTE" && paysEmployee !== "FR"
       ? 0
       : demande.nombreJours || 1;
-  if (!absenceSansDecoteAuSolde(ledgerKey, paysEmployee)) {
+  if (logicalLedger === "RETARD_DEMAND") {
+    ledgerKeyDebit = retardDebitLedgerKey(paysEmployee);
+    nbreJours = retardDebitAmountJours(paysEmployee);
+  }
+
+  if (!absenceSansDecoteAuSolde(logicalLedger, paysEmployee)) {
     if (!kongesSoldes[employeeId]) kongesSoldes[employeeId] = {};
-    if (!kongesSoldes[employeeId][ledgerKey]) {
-      kongesSoldes[employeeId][ledgerKey] = { utilise: 0, restant: 0 };
+    if (!kongesSoldes[employeeId][ledgerKeyDebit]) {
+      kongesSoldes[employeeId][ledgerKeyDebit] = { utilise: 0, restant: 0 };
     }
-    kongesSoldes[employeeId][ledgerKey].utilise += nbreJours;
+    kongesSoldes[employeeId][ledgerKeyDebit].utilise += nbreJours;
     const typesConges = typesCongePays[users[employeeId].pays] || {};
-    const totalJours = typesConges[ledgerKey]?.jours ?? 0;
-    kongesSoldes[employeeId][ledgerKey].restant =
-      totalJours - kongesSoldes[employeeId][ledgerKey].utilise;
+    const totalJours = typesConges[ledgerKeyDebit]?.jours ?? 0;
+    kongesSoldes[employeeId][ledgerKeyDebit].restant =
+      totalJours - kongesSoldes[employeeId][ledgerKeyDebit].utilise;
     console.log(
-      `✅ Solde LOCAL mis à jour: Utilisateur ${employeeId}, ${ledgerKey} (${typeCongeDemande}): +${nbreJours}j utilisés, Restant: ${kongesSoldes[employeeId][ledgerKey].restant}j`,
+      `✅ Solde LOCAL mis à jour: Utilisateur ${employeeId}, ${ledgerKeyDebit} (${typeCongeDemande}): +${nbreJours}j utilisés, Restant: ${kongesSoldes[employeeId][ledgerKeyDebit].restant}j`,
     );
   } else {
     console.log(
-      `📋 Approbation sans décrément solde (${ledgerKey}): demande ${demande.id}`,
+      `📋 Approbation sans décrément solde (${logicalLedger}): demande ${demande.id}`,
     );
   }
 
@@ -2085,21 +2179,27 @@ app.post("/api/demande/:id/annuler", (req, res) => {
   // Si la demande était approuvée, restaurer le solde
   if (demande.statut === "APPROUVE_RH") {
     const employeeId = demande.userId;
-    const ledgerKey = normalizeCongeLedgerKey(demande.typeConge);
-    const nbreJours = demande.nombreJours || 1;
+    const paysEmp = normalizePaysForQuota(users[employeeId].pays);
+    const logicalLedger = normalizeCongeLedgerKey(demande.typeConge);
+    let ledgerKeyDebit = logicalLedger;
+    let nbreJours = demande.nombreJours || 1;
+    if (logicalLedger === "RETARD_DEMAND") {
+      ledgerKeyDebit = retardDebitLedgerKey(paysEmp);
+      nbreJours = retardDebitAmountJours(paysEmp);
+    }
 
     if (
-      !absenceSansDecoteAuSolde(ledgerKey, normalizePaysForQuota(users[employeeId].pays)) &&
-      kongesSoldes[employeeId]?.[ledgerKey]
+      !absenceSansDecoteAuSolde(logicalLedger, paysEmp) &&
+      kongesSoldes[employeeId]?.[ledgerKeyDebit]
     ) {
-      kongesSoldes[employeeId][ledgerKey].utilise -= nbreJours;
+      kongesSoldes[employeeId][ledgerKeyDebit].utilise -= nbreJours;
       const typesConges = typesCongePays[users[employeeId].pays] || {};
-      const totalJours = typesConges[ledgerKey]?.jours ?? 0;
-      kongesSoldes[employeeId][ledgerKey].restant =
-        totalJours - kongesSoldes[employeeId][ledgerKey].utilise;
+      const totalJours = typesConges[ledgerKeyDebit]?.jours ?? 0;
+      kongesSoldes[employeeId][ledgerKeyDebit].restant =
+        totalJours - kongesSoldes[employeeId][ledgerKeyDebit].utilise;
 
       console.log(
-        `🔄 Solde restauré: Utilisateur ${employeeId}, ${ledgerKey}: -${nbreJours}j, Restant: ${kongesSoldes[employeeId][ledgerKey].restant}j`,
+        `🔄 Solde restauré: Utilisateur ${employeeId}, ${ledgerKeyDebit}: -${nbreJours}j, Restant: ${kongesSoldes[employeeId][ledgerKeyDebit].restant}j`,
       );
     }
   }
@@ -2160,7 +2260,14 @@ app.get("/api/rh/dashboard", (req, res) => {
   }).length;
   const rejetees = demandes.filter((d) => {
     const s = st(d);
-    return s === "REFUSE" || s === "REJETE" || s.includes("REFUS");
+    return (
+      s === "REFUSE" ||
+      s === "REJETE" ||
+      s === "REJETEE" ||
+      s.includes("REFUS") ||
+      s.includes("REJET") ||
+      s.includes("REJECT")
+    );
   }).length;
 
   const demandesParPays = {};

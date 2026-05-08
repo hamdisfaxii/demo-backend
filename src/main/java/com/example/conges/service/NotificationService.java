@@ -52,6 +52,9 @@ public class NotificationService {
     @Value("${app.notification.async}")
     private boolean asyncNotification;
 
+    @Value("${app.url:http://localhost:5175}")
+    private String appUrl;
+
     private static final DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
     /**
@@ -62,6 +65,13 @@ public class NotificationService {
             log.debug("Notifications désactivées");
             return;
         }
+        UserEntity ap = demande.getApprovedBy();
+        String approvedBy =
+                ap == null
+                        ? "—"
+                        : (String.valueOf(ap.getPrenom() == null ? "" : ap.getPrenom()).trim()
+                           + " "
+                           + String.valueOf(ap.getNom() == null ? "" : ap.getNom()).trim()).trim();
 
         EmailNotificationDto email = EmailNotificationDto.builder()
                 .to(user.getEmail())
@@ -72,8 +82,9 @@ public class NotificationService {
                 .addVariable("typeConge", demande.getTypeConge().toString())
                 .addVariable("dateDebut", demande.getDateDebut().format(dateFormatter))
                 .addVariable("dateFin", demande.getDateFin().format(dateFormatter))
-                .addVariable("nombreJours", demande.getNombreJours())
+                .addVariable("nombreJours", demande.getNombreJoursExactOrInt())
                 .addVariable("motif", demande.getMotif());
+        email.addVariable("approvedBy", approvedBy.isBlank() ? "—" : approvedBy);
 
         sendEmailNotification(email);
     }
@@ -242,15 +253,53 @@ public class NotificationService {
      */
     private String buildHtmlContent(String templateName, Map<String, Object> variables) {
         try {
+            Map<String, Object> safe = variables == null ? new HashMap<>() : new HashMap<>(variables);
+            safe.putIfAbsent("appUrl", appUrl);
             Template template = freemarkerConfig.getTemplate(templateName + ".ftl");
             StringWriter writer = new StringWriter();
-            template.process(variables, writer);
+            template.process(safe, writer);
             return writer.toString();
         } catch (Exception e) {
             log.error("Erreur lors de la génération du template {}", templateName, e);
             // Retourner un contenu par défaut si le template n'existe pas
             return getDefaultHtmlContent(templateName, variables);
         }
+    }
+
+    public void notifyNewRequestToSuperAdmins(
+            List<String> recipients,
+            DemandeConge demande,
+            UserEntity requester,
+            UserEntity approvedByAdmin
+    ) {
+        if (!notificationEnabled) {
+            return;
+        }
+        if (recipients == null || recipients.isEmpty()) {
+            return;
+        }
+        String approver = approvedByAdmin == null
+                ? "—"
+                : (String.valueOf(approvedByAdmin.getPrenom() == null ? "" : approvedByAdmin.getPrenom()).trim()
+                   + " "
+                   + String.valueOf(approvedByAdmin.getNom() == null ? "" : approvedByAdmin.getNom()).trim()).trim();
+        Map<String, Object> vars = new HashMap<>();
+        vars.put("requesterName", (requester.getPrenom() + " " + requester.getNom()).trim());
+        vars.put("requesterEmail", requester.getEmail());
+        vars.put("typeConge", String.valueOf(demande.getTypeConge()));
+        vars.put("dateDebut", demande.getDateDebut() != null ? demande.getDateDebut().format(dateFormatter) : "");
+        vars.put("dateFin", demande.getDateFin() != null ? demande.getDateFin().format(dateFormatter) : "");
+        vars.put("nombreJours", demande.getNombreJours());
+        vars.put("motif", demande.getMotif());
+        vars.put("approvedBy", approver);
+        vars.put("demandeId", demande.getId());
+
+        notifyMultipleRecipients(
+                recipients.stream().distinct().toList(),
+                "Nouvelle demande de congé créée",
+                "superadmin-new-request",
+                vars
+        );
     }
 
     /**

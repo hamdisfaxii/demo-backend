@@ -12,6 +12,7 @@ import com.example.conges.repository.EmployeeLeaveAllocationRepository;
 import com.example.conges.repository.HolidayRepository;
 import com.example.conges.repository.LeaveTypeRepository;
 import com.example.conges.repository.UserRepository;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -93,13 +94,19 @@ public class DolibarrSyncService {
         log.info("📋 Synchronisation des types de congés...");
 
         List<DolibarrLeaveTypeDto> dolibarrTypes = dolibarrService.getLeaveTypesFromDolibarr();
+        if (dolibarrTypes == null || dolibarrTypes.isEmpty()) {
+            try {
+                dolibarrTypes = dolibarrService.getLeaveTypesFromDolibarrDb();
+                log.info("📋 Types de congés via DB Dolibarr: {}", dolibarrTypes.size());
+            } catch (RuntimeException ex) {
+                log.warn("📋 Fallback DB types de congés indisponible: {}", ex.getMessage());
+                dolibarrTypes = List.of();
+            }
+        }
         int syncCount = 0;
 
         for (DolibarrLeaveTypeDto doliType : dolibarrTypes) {
-            if (!doliType.isActive()) {
-                log.debug("Skipping inactive leave type: {}", doliType.getCode());
-                continue;
-            }
+            boolean isActive = doliType.getActive() == null || doliType.getActive() == 1;
 
             Optional<LeaveType> existing = leaveTypeRepository.findByDolibarrLeaveTypeId(doliType.getId());
 
@@ -110,7 +117,7 @@ public class DolibarrSyncService {
                 leaveType.setLibelle(doliType.getLibelle());
                 leaveType.setDescription(doliType.getDescription());
                 leaveType.setCouleur(doliType.getCouleur());
-                leaveType.setActive(doliType.isActive());
+                leaveType.setActive(isActive);
                 leaveType.setRequiresApproval(doliType.requiresApproval());
                 leaveType.setDelai(doliType.getDelai() != null ? doliType.getDelai().longValue() : 0L);
                 leaveType.setUpdatedAt(LocalDateTime.now());
@@ -126,7 +133,7 @@ public class DolibarrSyncService {
                         .libelle(doliType.getLibelle())
                         .description(doliType.getDescription())
                         .couleur(doliType.getCouleur())
-                        .active(doliType.isActive())
+                        .active(isActive)
                         .requiresApproval(doliType.requiresApproval())
                         .delai(doliType.getDelai() != null ? doliType.getDelai().longValue() : 0L)
                         .createdAt(LocalDateTime.now())
@@ -156,8 +163,13 @@ public class DolibarrSyncService {
         int syncCount = 0;
 
         for (DolibarrHolidayDto doliHoliday : dolibarrHolidays) {
-            if (!doliHoliday.isActive()) {
-                log.debug("Skipping inactive holiday: {}", doliHoliday.getLibelle());
+            boolean isActive = doliHoliday.getActive() == null || doliHoliday.getActive() == 1;
+            if (doliHoliday.getId() == null
+                    || doliHoliday.getDateJour() == null
+                    || doliHoliday.getLibelle() == null
+                    || doliHoliday.getLibelle().isBlank()) {
+                log.warn("Holiday Dolibarr ignoré (données incomplètes): id={}, label={}, date={}",
+                        doliHoliday.getId(), doliHoliday.getLibelle(), doliHoliday.getDateJour());
                 continue;
             }
 
@@ -171,7 +183,7 @@ public class DolibarrSyncService {
                 holiday.setDuree(doliHoliday.getDuree() != null ? doliHoliday.getDuree() : 1.0);
                 holiday.setIdPays(doliHoliday.getIdPays());
                 holiday.setCountryCode(resolveCountryCode(doliHoliday.getIdPays()));
-                holiday.setActive(doliHoliday.isActive());
+                holiday.setActive(isActive);
                 holiday.setUpdatedAt(LocalDateTime.now());
 
                 holidayRepository.save(holiday);
@@ -186,7 +198,7 @@ public class DolibarrSyncService {
                         .duree(doliHoliday.getDuree() != null ? doliHoliday.getDuree() : 1.0)
                         .idPays(doliHoliday.getIdPays())
                         .countryCode(resolveCountryCode(doliHoliday.getIdPays()))
-                        .active(doliHoliday.isActive())
+                        .active(isActive)
                         .createdAt(LocalDateTime.now())
                         .updatedAt(LocalDateTime.now())
                         .build();
@@ -242,6 +254,14 @@ public class DolibarrSyncService {
             Optional<EmployeeLeaveAllocation> existing = 
                     allocationRepository.findByDolibarrAllocationId(allocation.getId());
 
+            int anneeEff = allocation.getAnnee() != null ? allocation.getAnnee() : java.time.Year.now().getValue();
+            LocalDate debut = allocation.getDateDebut() != null
+                    ? allocation.getDateDebut()
+                    : LocalDate.of(anneeEff, 1, 1);
+            LocalDate fin = allocation.getDateFin() != null
+                    ? allocation.getDateFin()
+                    : LocalDate.of(anneeEff, 12, 31);
+
             if (existing.isPresent()) {
                 // Mise à jour
                 EmployeeLeaveAllocation alloc = existing.get();
@@ -251,8 +271,9 @@ public class DolibarrSyncService {
                 alloc.setJoursInitiaux(ini);
                 alloc.setJoursUtilises(uti);
                 alloc.setJoursDisponibles(eff);
-                alloc.setDateDebut(allocation.getDateDebut());
-                alloc.setDateFin(allocation.getDateFin());
+                alloc.setDateDebut(debut);
+                alloc.setDateFin(fin);
+                alloc.setAnnee(anneeEff);
                 alloc.setActive(allocation.isActive());
                 alloc.setUpdatedAt(LocalDateTime.now());
 
@@ -274,9 +295,9 @@ public class DolibarrSyncService {
                         .joursInitiaux(iniCreate)
                         .joursUtilises(utiCreate)
                         .joursDisponibles(effCreate)
-                        .annee(allocation.getAnnee())
-                        .dateDebut(allocation.getDateDebut())
-                        .dateFin(allocation.getDateFin())
+                        .annee(anneeEff)
+                        .dateDebut(debut)
+                        .dateFin(fin)
                         .active(allocation.isActive())
                         .createdAt(LocalDateTime.now())
                         .updatedAt(LocalDateTime.now())

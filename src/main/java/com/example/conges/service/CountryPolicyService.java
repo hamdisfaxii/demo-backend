@@ -15,6 +15,10 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * Plafonds, prorata et règles <strong>par pays métier</strong> (TN, MA, FR, etc.) pour les congés.
+ * Ces règles sont exclusivement dans cette application ; elles ne sont pas « calculées » par Dolibarr.
+ */
 @Service
 @RequiredArgsConstructor
 public class CountryPolicyService {

@@ -9,8 +9,11 @@ import com.example.conges.repository.DemandeCongeRepository;
 import com.example.conges.repository.HolidayRepository;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,8 +21,12 @@ import org.springframework.transaction.annotation.Transactional;
 @RequiredArgsConstructor
 public class CalendarService {
 
+    private static final Set<Role> CALENDAR_ROLES =
+            EnumSet.of(Role.EMPLOYE, Role.RH, Role.MANAGER, Role.ADMIN);
+
     private final DemandeCongeRepository demandeCongeRepository;
     private final HolidayRepository holidayRepository;
+    private final CountryPolicyService countryPolicyService;
 
     @Transactional(readOnly = true)
     public List<CalendarEventResponse> getEvents(
@@ -30,15 +37,26 @@ public class CalendarService {
             String department,
             String country
     ) {
+        assertActorMayUseCalendar(actor);
         List<CalendarEventResponse> events = new ArrayList<>();
-        String effectiveCountry = resolveCountry(actor, country);
+        String geoCountry = resolveCountry(actor, country);
+
+        Long effectiveEmployeeId = employeeId;
+        String effectiveDepartment = normalizeOptional(department);
+        if (actor != null && actor.getRole() == Role.EMPLOYE) {
+            effectiveEmployeeId = actor.getId();
+            effectiveDepartment = null;
+        }
+
+        /* Fériés : filtre pays métier (souvent ISO2). Congés : pour l'employé, l'ID suffit ; u.pays peut être libellé (« France ») et ne pas matcher « FR ». */
+        String leaveCountryFilter = actor.getRole() == Role.EMPLOYE ? null : geoCountry;
 
         List<DemandeConge> leaves = demandeCongeRepository.findApprovedForCalendar(
                 startDate,
                 endDate,
-                employeeId,
-                normalizeOptional(department),
-                effectiveCountry
+                effectiveEmployeeId,
+                effectiveDepartment,
+                leaveCountryFilter
         );
         for (DemandeConge leave : leaves) {
             String fullName = (leave.getUser().getPrenom() + " " + leave.getUser().getNom()).trim();
@@ -56,10 +74,33 @@ public class CalendarService {
                     .build());
         }
 
+        List<DemandeConge> pendingLeaves = demandeCongeRepository.findPendingForCalendar(
+                startDate,
+                endDate,
+                effectiveEmployeeId,
+                effectiveDepartment,
+                leaveCountryFilter
+        );
+        for (DemandeConge leave : pendingLeaves) {
+            String fullName = (leave.getUser().getPrenom() + " " + leave.getUser().getNom()).trim();
+            events.add(CalendarEventResponse.builder()
+                    .eventType("MY_LEAVE_PENDING")
+                    .demandeId(leave.getId())
+                    .userId(leave.getUser().getId())
+                    .employeeName(fullName)
+                    .department(leave.getUser().getDepartement())
+                    .country(leave.getUser().getPays())
+                    .leaveType(leave.getTypeConge().name())
+                    .title("(En attente) " + fullName + " - " + leave.getTypeConge().getLibelle())
+                    .startDate(leave.getDateDebut())
+                    .endDate(leave.getDateFin())
+                    .build());
+        }
+
         List<Holiday> holidays = holidayRepository.findByDateRangeWithOptionalCountry(
                 startDate,
                 endDate,
-                effectiveCountry
+                geoCountry
         );
         for (Holiday holiday : holidays) {
             events.add(CalendarEventResponse.builder()
@@ -71,6 +112,16 @@ public class CalendarService {
                     .build());
         }
         return events;
+    }
+
+    private void assertActorMayUseCalendar(UserEntity actor) {
+        if (actor == null) {
+            throw new AccessDeniedException("Authentification requise");
+        }
+        Role role = actor.getRole();
+        if (role == null || !CALENDAR_ROLES.contains(role)) {
+            throw new AccessDeniedException("Rôle non autorisé pour le calendrier");
+        }
     }
 
     private String normalizeOptionalCountry(String country) {
@@ -91,6 +142,14 @@ public class CalendarService {
         if (actor != null && actor.getRole() == Role.ADMIN) {
             return normalizeOptionalCountry(requestedCountry);
         }
-        return normalizeOptionalCountry(actor == null ? null : actor.getPays());
+        if (actor == null) {
+            return normalizeOptionalCountry(requestedCountry);
+        }
+        String actorIso = countryPolicyService.normalizeBusinessCountry(actor.getPays());
+        String requested = normalizeOptionalCountry(requestedCountry);
+        if (requested != null && requested.equals(actorIso)) {
+            return requested;
+        }
+        return actorIso;
     }
 }

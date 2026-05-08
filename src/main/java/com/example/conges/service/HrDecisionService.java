@@ -198,6 +198,7 @@ public class HrDecisionService {
 
     private HrLeaveRequestResponse toHrResponse(DemandeConge d) {
         UserEntity u = d.getUser();
+        UserEntity ap = d.getApprovedBy();
         return HrLeaveRequestResponse.builder()
                 .id(d.getId())
                 .typeConge(d.getTypeConge())
@@ -205,6 +206,9 @@ public class HrDecisionService {
                 .dateDebut(d.getDateDebut())
                 .dateFin(d.getDateFin())
                 .nombreJours(d.getNombreJours())
+                .nombreJoursExact(d.getNombreJoursExact())
+                .startHalfDay(d.getStartHalfDay() == null ? null : d.getStartHalfDay().name())
+                .endHalfDay(d.getEndHalfDay() == null ? null : d.getEndHalfDay().name())
                 .motif(d.getMotif())
                 .commentaireRh(d.getCommentaireRh())
                 .dateSoumission(d.getDateSoumission())
@@ -218,6 +222,12 @@ public class HrDecisionService {
                         .email(u.getEmail())
                         .country(u.getPays())
                         .department(u.getDepartement())
+                        .build())
+                .approuvePar(ap == null ? null : HrLeaveRequestResponse.ApproverInfo.builder()
+                        .id(ap.getId())
+                        .nom(ap.getNom())
+                        .prenom(ap.getPrenom())
+                        .email(ap.getEmail())
                         .build())
                 .build();
     }

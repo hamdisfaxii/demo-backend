@@ -43,8 +43,8 @@ public interface HistoryRepository extends JpaRepository<History, Long> {
      * Recherche avancée avec filtres multiples
      */
     @Query("SELECT h FROM History h WHERE " +
-            "(:userId IS NULL OR h.user.id = :userId) AND " +
-            "(:demandeId IS NULL OR h.demande.id = :demandeId) AND " +
+            "(:userId IS NULL OR h.userId = :userId) AND " +
+            "(:demandeId IS NULL OR h.demandeId = :demandeId) AND " +
             "(:actionType IS NULL OR h.actionType = :actionType) AND " +
             "(:pays IS NULL OR h.pays = :pays) AND " +
             "(:startDate IS NULL OR h.actionDate >= :startDate) AND " +
@@ -63,8 +63,8 @@ public interface HistoryRepository extends JpaRepository<History, Long> {
      * Recherche pour export (sans pagination), triée du plus récent au plus ancien.
      */
     @Query("SELECT h FROM History h WHERE " +
-            "(:userId IS NULL OR h.user.id = :userId) AND " +
-            "(:demandeId IS NULL OR h.demande.id = :demandeId) AND " +
+            "(:userId IS NULL OR h.userId = :userId) AND " +
+            "(:demandeId IS NULL OR h.demandeId = :demandeId) AND " +
             "(:actionType IS NULL OR h.actionType = :actionType) AND " +
             "(:pays IS NULL OR h.pays = :pays) AND " +
             "(:startDate IS NULL OR h.actionDate >= :startDate) AND " +
@@ -92,10 +92,12 @@ public interface HistoryRepository extends JpaRepository<History, Long> {
      */
     Long countByActionType(ActionType actionType);
 
+    boolean existsByDemandeIdAndActionType(Long demandeId, ActionType actionType);
+
     /**
      * Récupère les actions d'un utilisateur sur une période
      */
-    @Query("SELECT h FROM History h WHERE h.user.id = :userId AND " +
+    @Query("SELECT h FROM History h WHERE h.userId = :userId AND " +
             "h.actionDate BETWEEN :startDate AND :endDate ORDER BY h.actionDate DESC")
     List<History> getUserHistoryByPeriod(
             @Param("userId") Long userId,

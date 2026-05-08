@@ -77,7 +77,9 @@ public class PdfExportService {
                     .setFont(normalFont)
                     .setFontSize(9));
 
-            String userName = history.getUser().getPrenom() + " " + history.getUser().getNom();
+            String userName = ((history.getUserPrenom() != null ? history.getUserPrenom() : "") + " " +
+                    (history.getUserNom() != null ? history.getUserNom() : "")).trim();
+            if (userName.isEmpty()) userName = history.getUserEmail() != null ? history.getUserEmail() : String.valueOf(history.getUserId());
             table.addCell(new Cell()
                     .add(new Paragraph(userName))
                     .setFont(normalFont)
@@ -93,7 +95,7 @@ public class PdfExportService {
                     .setFont(normalFont)
                     .setFontSize(9));
 
-            String demandeId = history.getDemande() != null ? history.getDemande().getId().toString() : "-";
+            String demandeId = history.getDemandeId() != null ? history.getDemandeId().toString() : "-";
             table.addCell(new Cell()
                     .add(new Paragraph(demandeId))
                     .setFont(normalFont)

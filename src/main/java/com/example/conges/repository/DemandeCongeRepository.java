@@ -26,7 +26,8 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
     List<DemandeConge> findByDateDebutBetween(@Param("debut") LocalDate debut, @Param("fin") LocalDate fin);
 
     @Query("""
-            SELECT d.typeConge AS typeConge, COALESCE(SUM(d.nombreJours), 0) AS totalJours
+            SELECT d.typeConge AS typeConge,
+                   COALESCE(SUM(COALESCE(d.nombreJoursExact, d.nombreJours)), 0) AS totalJours
             FROM DemandeConge d
             WHERE d.user.id = :userId AND d.statut IN :statuts
             GROUP BY d.typeConge
@@ -49,6 +50,21 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
 
     long countByStatut(StatutConge statut);
     long countByStatutAndUser_PaysIgnoreCase(StatutConge statut, String pays);
+
+    @Query("""
+            SELECT COUNT(d)
+            FROM DemandeConge d
+            WHERE d.user.id = :userId
+              AND d.statut IN :statuts
+              AND d.dateDebut <= :endDate
+              AND d.dateFin >= :startDate
+            """)
+    long countOverlappingDemandes(
+            @Param("userId") Long userId,
+            @Param("statuts") Collection<StatutConge> statuts,
+            @Param("startDate") LocalDate startDate,
+            @Param("endDate") LocalDate endDate
+    );
 
     @Query("SELECT d.typeConge AS typeConge, COUNT(d) AS total FROM DemandeConge d GROUP BY d.typeConge")
     List<TypeDemandesCountProjection> countDemandesGroupedByTypeConge();
@@ -117,6 +133,26 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
             ORDER BY d.dateDebut ASC
             """)
     List<DemandeConge> findApprovedForCalendar(
+            @Param("startDate") LocalDate startDate,
+            @Param("endDate") LocalDate endDate,
+            @Param("employeeId") Long employeeId,
+            @Param("department") String department,
+            @Param("country") String country
+    );
+
+    @Query("""
+            SELECT DISTINCT d
+            FROM DemandeConge d
+            JOIN FETCH d.user u
+            WHERE d.statut = com.example.conges.entity.StatutConge.EN_ATTENTE
+              AND d.dateDebut <= :endDate
+              AND d.dateFin >= :startDate
+              AND (:employeeId IS NULL OR u.id = :employeeId)
+              AND (:department IS NULL OR u.departement = :department)
+              AND (:country IS NULL OR u.pays = :country)
+            ORDER BY d.dateDebut ASC
+            """)
+    List<DemandeConge> findPendingForCalendar(
             @Param("startDate") LocalDate startDate,
             @Param("endDate") LocalDate endDate,
             @Param("employeeId") Long employeeId,

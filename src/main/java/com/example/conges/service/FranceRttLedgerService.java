@@ -196,10 +196,15 @@ public class FranceRttLedgerService {
 
     @Transactional(readOnly = true)
     public void assertSufficientFranceCourte(UserEntity user, int year, LocalDate asOf, int joursDemandes) {
+        assertSufficientFranceCourteExact(user, year, asOf, (double) joursDemandes);
+    }
+
+    @Transactional(readOnly = true)
+    public void assertSufficientFranceCourteExact(UserEntity user, int year, LocalDate asOf, double joursDemandesExact) {
         if (!governsFranceCourteRequests(user)) {
             return;
         }
-        if (joursDemandes <= 0) {
+        if (!(joursDemandesExact > 0d)) {
             throw new IllegalArgumentException("Le nombre de jours RTT doit être positif.");
         }
         FranceRttSettings settings = resolvedSettingsSnapshot();
@@ -213,10 +218,10 @@ public class FranceRttLedgerService {
         BigDecimal pending = pendingCourteAsBigDecimal(year, user.getId());
         BigDecimal dispo =
                 earned.subtract(usedApproved).subtract(pending).setScale(SCALE, RoundingMode.HALF_UP);
-        if (BigDecimal.valueOf(joursDemandes).compareTo(dispo) > 0) {
+        if (BigDecimal.valueOf(joursDemandesExact).compareTo(dispo) > 0) {
             throw new IllegalStateException(String.format(
-                    "Solde RTT France insuffisant : %d jour(s) demandé(s), %s jour(s) disponibles au regard du moteur (incluant demandes en attente).",
-                    joursDemandes, dispo.stripTrailingZeros().toPlainString()));
+                    "Solde RTT France insuffisant : %.2f jour(s) demandé(s), %s jour(s) disponibles au regard du moteur (incluant demandes en attente).",
+                    joursDemandesExact, dispo.stripTrailingZeros().toPlainString()));
         }
     }
 

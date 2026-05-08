@@ -32,6 +32,7 @@
                     <li><strong>Date de début :</strong> ${dateDebut}</li>
                     <li><strong>Date de fin :</strong> ${dateFin}</li>
                     <li><strong>Nombre de jours :</strong> ${nombreJours}</li>
+                    <li><strong>Approuvé par :</strong> ${approvedBy}</li>
                     <li><strong>Motif :</strong> ${motif}</li>
                 </ul>
             </div>

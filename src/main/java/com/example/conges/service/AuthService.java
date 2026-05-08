@@ -11,6 +11,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
@@ -21,6 +23,7 @@ public class AuthService {
     private final UserRepository userRepository;
     private final JwtService jwtService;
     private final DolibarrService dolibarrService;
+    private final DolibarrBackgroundSyncFacade dolibarrBackgroundSyncFacade;
 
     @Transactional
     public AuthResponse login(LoginRequest request) {
@@ -35,41 +38,14 @@ public class AuthService {
         // Essayer d'abord avec Dolibarr si configuré
         DolibarrEmployeeDto dolibarrUser = dolibarrService.authenticateUserViaApi(email, password);
         if (dolibarrUser != null) {
-            return handleDolibarrLogin(dolibarrUser, email);
+            AuthResponse response = handleDolibarrLogin(dolibarrUser, email);
+            scheduleFullDolibarrSyncAfterCommitIfConfigured();
+            return response;
         }
 
-        // Fallback: Si Dolibarr échoue, créer/utiliser un utilisateur test local
-        log.warn("⚠️ Authentification Dolibarr échouée. Tentative avec utilisateur local...");
-        UserEntity user = userRepository.findByEmail(email).orElse(null);
-        
-        if (user == null) {
-            // Créer un nouvel utilisateur local pour les tests
-            user = UserEntity.builder()
-                    .email(email)
-                    .nom("Test")
-                    .prenom("User")
-                    .role(email.toLowerCase().contains("admin") ? Role.ADMIN : Role.EMPLOYE)
-                    .pays("FR")
-                    .build();
-            user = userRepository.save(user);
-            log.info("✅ Utilisateur test créé: email={}, role={}", user.getEmail(), user.getRole());
-        }
-
-        String token = jwtService.generateToken(user);
-        log.info("✅ Connexion OK (mode local) userId={}, email={}, role={}", user.getId(), user.getEmail(), user.getRole());
-
-        return AuthResponse.builder()
-                .token(token)
-                .type("Bearer")
-                .user(AuthResponse.UserInfo.builder()
-                        .id(user.getId())
-                        .email(user.getEmail())
-                        .nom(user.getNom())
-                        .prenom(user.getPrenom())
-                        .role(user.getRole())
-                        .pays(user.getPays())
-                        .build())
-                .build();
+        // Comptes : authentification et identité depuis Dolibarr uniquement (pas de compte test local).
+        log.warn("⚠️ Authentification Dolibarr échouée pour email={}. Connexion refusée.", email);
+        throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Identifiants invalides (Dolibarr).");
     }
 
     private AuthResponse handleDolibarrLogin(DolibarrEmployeeDto dolibarrUser, String email) {
@@ -136,5 +112,27 @@ public class AuthService {
         }
 
         return Role.EMPLOYE;
+    }
+
+    /**
+     * Une fois la transaction login validée : resynchroniser employés / types / féries / allocations
+     * depuis Dolibarr (cohérence avec donnée métier après chaque connexion).
+     */
+    private void scheduleFullDolibarrSyncAfterCommitIfConfigured() {
+        if (!dolibarrService.isDolibarrConnectionConfigured()) {
+            return;
+        }
+        Runnable run = () -> dolibarrBackgroundSyncFacade.triggerFullSyncAfterLogin();
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            run.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        run.run();
+                    }
+                });
     }
 }

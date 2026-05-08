@@ -16,6 +16,9 @@ public class HrLeaveRequestResponse {
     private LocalDate dateDebut;
     private LocalDate dateFin;
     private Integer nombreJours;
+    private Double nombreJoursExact;
+    private String startHalfDay;
+    private String endHalfDay;
     private String motif;
     private String commentaireRh;
     private LocalDateTime dateSoumission;
@@ -23,6 +26,7 @@ public class HrLeaveRequestResponse {
     private Integer currentStepOrder;
     private String currentStepType;
     private EmployeInfo employe;
+    private ApproverInfo approuvePar;
 
     @Data
     @Builder
@@ -33,5 +37,14 @@ public class HrLeaveRequestResponse {
         private String email;
         private String country;
         private String department;
+    }
+
+    @Data
+    @Builder
+    public static class ApproverInfo {
+        private Long id;
+        private String nom;
+        private String prenom;
+        private String email;
     }
 }

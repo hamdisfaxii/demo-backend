@@ -64,12 +64,14 @@ public class ExcelExportService {
             dateCell.setCellStyle(dateStyle);
 
             // Utilisateur
-            row.createCell(1).setCellValue(
-                    history.getUser().getPrenom() + " " + history.getUser().getNom());
+            String userName = ((history.getUserPrenom() != null ? history.getUserPrenom() : "") + " " +
+                    (history.getUserNom() != null ? history.getUserNom() : "")).trim();
+            if (userName.isEmpty()) userName = history.getUserEmail() != null ? history.getUserEmail() : String.valueOf(history.getUserId());
+            row.createCell(1).setCellValue(userName);
             row.getCell(1).setCellStyle(cellStyle);
 
             // Email
-            row.createCell(2).setCellValue(history.getUser().getEmail());
+            row.createCell(2).setCellValue(history.getUserEmail() != null ? history.getUserEmail() : "-");
             row.getCell(2).setCellStyle(cellStyle);
 
             // Action
@@ -82,7 +84,7 @@ public class ExcelExportService {
 
             // Demande ID
             row.createCell(5).setCellValue(
-                    history.getDemande() != null ? String.valueOf(history.getDemande().getId()) : "-");
+                    history.getDemandeId() != null ? String.valueOf(history.getDemandeId()) : "-");
             row.getCell(5).setCellStyle(cellStyle);
 
             // Pays
@@ -138,7 +140,7 @@ public class ExcelExportService {
 
         // Headers du tableau
         XSSFRow headerRow = sheet.createRow(4);
-        String[] headers = {"Date", "Utilisateur", "Action", "Type Congé", "Jours", "Pays", "Statut"};
+        String[] headers = {"Date", "Utilisateur", "Action", "Demande ID", "Pays", "Statut"};
 
         for (int i = 0; i < headers.length; i++) {
             XSSFCell cell = headerRow.createCell(i);
@@ -149,33 +151,29 @@ public class ExcelExportService {
         // Remplir les données
         int rowNum = 5;
         for (History history : historyList) {
-            if (history.getDemande() != null) {
-                XSSFRow row = sheet.createRow(rowNum++);
+            XSSFRow row = sheet.createRow(rowNum++);
 
-                row.createCell(0).setCellValue(
-                        history.getActionDate().format(DateTimeFormatter.ofPattern("dd/MM/yyyy")));
-                row.getCell(0).setCellStyle(cellStyle);
+            row.createCell(0).setCellValue(
+                    history.getActionDate().format(DateTimeFormatter.ofPattern("dd/MM/yyyy")));
+            row.getCell(0).setCellStyle(cellStyle);
 
-                row.createCell(1).setCellValue(
-                        history.getUser().getPrenom() + " " + history.getUser().getNom());
-                row.getCell(1).setCellStyle(cellStyle);
+            String rhUser = ((history.getUserPrenom() != null ? history.getUserPrenom() : "") + " " +
+                    (history.getUserNom() != null ? history.getUserNom() : "")).trim();
+            if (rhUser.isEmpty()) rhUser = history.getUserEmail() != null ? history.getUserEmail() : String.valueOf(history.getUserId());
+            row.createCell(1).setCellValue(rhUser);
+            row.getCell(1).setCellStyle(cellStyle);
 
-                row.createCell(2).setCellValue(history.getActionType().toString());
-                row.getCell(2).setCellStyle(cellStyle);
+            row.createCell(2).setCellValue(history.getActionType().toString());
+            row.getCell(2).setCellStyle(cellStyle);
 
-                row.createCell(3).setCellValue(
-                        history.getDemande().getTypeConge().toString());
-                row.getCell(3).setCellStyle(cellStyle);
+            row.createCell(3).setCellValue(history.getDemandeId() != null ? String.valueOf(history.getDemandeId()) : "-");
+            row.getCell(3).setCellStyle(cellStyle);
 
-                row.createCell(4).setCellValue(history.getDemande().getNombreJours());
-                row.getCell(4).setCellStyle(cellStyle);
+            row.createCell(4).setCellValue(history.getPays() != null ? history.getPays() : "-");
+            row.getCell(4).setCellStyle(cellStyle);
 
-                row.createCell(5).setCellValue(history.getPays() != null ? history.getPays() : "-");
-                row.getCell(5).setCellStyle(cellStyle);
-
-                row.createCell(6).setCellValue(history.getStatut());
-                row.getCell(6).setCellStyle(cellStyle);
-            }
+            row.createCell(5).setCellValue(history.getStatut() != null ? history.getStatut() : "-");
+            row.getCell(5).setCellStyle(cellStyle);
         }
 
         // Autosize colonnes

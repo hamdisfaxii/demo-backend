@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -23,7 +24,7 @@ public class CalendarController {
     private final CalendarService calendarService;
 
     @GetMapping("/events")
-    @PreAuthorize("hasAnyRole('RH','MANAGER','ADMIN')")
+    @PreAuthorize("isAuthenticated()")
     public ResponseEntity<List<CalendarEventResponse>> getEvents(
             @AuthenticationPrincipal UserEntity actor,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
@@ -32,6 +33,9 @@ public class CalendarController {
             @RequestParam(required = false) String department,
             @RequestParam(required = false) String country
     ) {
+        if (actor == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
         return ResponseEntity.ok(calendarService.getEvents(
                 actor,
                 startDate,

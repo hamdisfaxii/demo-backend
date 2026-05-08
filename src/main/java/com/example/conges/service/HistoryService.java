@@ -1,9 +1,7 @@
 package com.example.conges.service;
 
-import com.example.conges.entity.DemandeConge;
 import com.example.conges.entity.History;
 import com.example.conges.entity.History.ActionType;
-import com.example.conges.entity.UserEntity;
 import com.example.conges.repository.HistoryRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -38,24 +36,29 @@ public class HistoryService {
      * Méthode générique appelée par les autres services.
      */
     @Transactional
-    public void recordAction(UserEntity user, DemandeConge demande, ActionType actionType,
-                           String description, String details) {
+    public void recordAction(Long userId, Long demandeId, ActionType actionType,
+                             String description, String details,
+                             String pays, String statut,
+                             String userNom, String userPrenom, String userEmail) {
         try {
             History history = History.builder()
-                    .user(user)
-                    .demande(demande)
+                    .userId(userId)
+                    .demandeId(demandeId)
                     .actionType(actionType)
                     .description(description)
                     .details(details)
-                    .pays(user.getPays())
-                    .statut(demande != null ? demande.getStatut().toString() : null)
+                    .pays(pays)
+                    .statut(statut)
+                    .userNom(userNom)
+                    .userPrenom(userPrenom)
+                    .userEmail(userEmail)
                     .ipAddress(getClientIpAddress())
                     .userAgent(getUserAgent())
                     .actionDate(LocalDateTime.now())
                     .build();
 
             historyRepository.save(history);
-            log.info("Action enregistrée: {} pour l'utilisateur {}", actionType, user.getId());
+            log.info("Action enregistrée: {} pour l'utilisateur {}", actionType, userId);
         } catch (Exception e) {
             log.error("Erreur lors de l'enregistrement de l'historique", e);
             // Ne pas lever l'exception pour ne pas interrompre le flux métier
@@ -63,10 +66,40 @@ public class HistoryService {
     }
 
     /**
+     * Surcharge pratique (si l'appelant a déjà un objet user/demande internes).
+     * Ne crée AUCUNE relation JPA: on copie seulement des champs scalaires.
+     */
+    @Transactional
+    public void recordAction(com.example.conges.entity.UserEntity user,
+                             com.example.conges.entity.DemandeConge demande,
+                             ActionType actionType,
+                             String description,
+                             String details) {
+        Long userId = user != null ? user.getId() : null;
+        if (userId == null) {
+            // historique inutilisable sans userId -> ne pas casser le flux métier
+            log.warn("Historique ignoré: userId manquant (actionType={})", actionType);
+            return;
+        }
+        recordAction(
+                userId,
+                demande != null ? demande.getId() : null,
+                actionType,
+                description,
+                details,
+                user != null ? user.getPays() : null,
+                demande != null && demande.getStatut() != null ? demande.getStatut().toString() : null,
+                user != null ? user.getNom() : null,
+                user != null ? user.getPrenom() : null,
+                user != null ? user.getEmail() : null
+        );
+    }
+
+    /**
      * Enregistre l'approbation d'une demande
      */
     @Transactional
-    public void recordApproval(UserEntity user, DemandeConge demande, String approverName) {
+    public void recordApproval(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String approverName) {
         String description = "Demande approuvée par " + approverName;
         String details = buildDetails(
                 "approver", approverName,
@@ -80,7 +113,7 @@ public class HistoryService {
      * Enregistre le rejet d'une demande
      */
     @Transactional
-    public void recordRejection(UserEntity user, DemandeConge demande, String rejectionReason) {
+    public void recordRejection(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String rejectionReason) {
         String description = "Demande rejetée";
         String details = buildDetails(
                 "reason", rejectionReason,
@@ -94,13 +127,17 @@ public class HistoryService {
      * Enregistre la création d'une demande
      */
     @Transactional
-    public void recordCreation(UserEntity user, DemandeConge demande) {
+    public void recordCreation(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande) {
         String description = "Demande de congé créée";
         String details = buildDetails(
                 "typeConge", demande.getTypeConge().toString(),
                 "dateDebut", demande.getDateDebut().toString(),
                 "dateFin", demande.getDateFin().toString(),
-                "nombreJours", String.valueOf(demande.getNombreJours())
+                "nombreJours", String.valueOf(demande.getNombreJours()),
+                "nombreJoursExact", String.valueOf(demande.getNombreJoursExactOrInt()),
+                "startHalfDay", String.valueOf(demande.getStartHalfDay()),
+                "endHalfDay", String.valueOf(demande.getEndHalfDay()),
+                "approvedByAdminId", demande.getApprovedBy() != null ? String.valueOf(demande.getApprovedBy().getId()) : ""
         );
         recordAction(user, demande, ActionType.CREATE, description, details);
     }
@@ -109,7 +146,7 @@ public class HistoryService {
      * Enregistre la modification d'une demande
      */
     @Transactional
-    public void recordUpdate(UserEntity user, DemandeConge demande, String changes) {
+    public void recordUpdate(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String changes) {
         String description = "Demande mise à jour";
         recordAction(user, demande, ActionType.UPDATE, description, changes);
     }
@@ -118,7 +155,7 @@ public class HistoryService {
      * Enregistre l'annulation d'une demande
      */
     @Transactional
-    public void recordCancellation(UserEntity user, DemandeConge demande, String reason) {
+    public void recordCancellation(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String reason) {
         String description = "Demande annulée";
         String details = buildDetails(
                 "reason", reason,
@@ -132,17 +169,39 @@ public class HistoryService {
      * Enregistre une synchronisation avec Dolibarr
      */
     @Transactional
-    public void recordDolibarrSync(UserEntity user, DemandeConge demande, String syncStatus) {
+    public void recordDolibarrSync(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String syncStatus) {
         String description = "Synchronisation Dolibarr";
         String details = buildDetails("syncStatus", syncStatus);
         recordAction(user, demande, ActionType.SYNCED_DOLIBARR, description, details);
+    }
+
+    /** Anti-doublon : un seul log par demande. */
+    @Transactional
+    public boolean recordSuperAdminsNotifiedOnce(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String details) {
+        try {
+            if (demande == null || demande.getId() == null) return false;
+            if (historyRepository.existsByDemandeIdAndActionType(demande.getId(), ActionType.SUPERADMINS_NOTIFIED)) {
+                return false;
+            }
+            recordAction(
+                    user,
+                    demande,
+                    ActionType.SUPERADMINS_NOTIFIED,
+                    "Notification Super Admins (création demande)",
+                    details
+            );
+            return true;
+        } catch (RuntimeException ex) {
+            // ne pas casser le flux métier
+            return false;
+        }
     }
 
     /**
      * Enregistre un export de document
      */
     @Transactional
-    public void recordExport(UserEntity user, DemandeConge demande, String exportFormat, String filename) {
+    public void recordExport(com.example.conges.entity.UserEntity user, com.example.conges.entity.DemandeConge demande, String exportFormat, String filename) {
         String description = String.format("Export %s effectué", exportFormat);
         String details = buildDetails("format", exportFormat, "filename", filename);
         recordAction(user, demande, ActionType.EXPORTED, description, details);
@@ -152,9 +211,13 @@ public class HistoryService {
      * Enregistre une connexion utilisateur
      */
     @Transactional
-    public void recordLogin(UserEntity user) {
+    public void recordLogin(com.example.conges.entity.UserEntity user) {
+        if (user == null || user.getId() == null) return;
         History history = History.builder()
-                .user(user)
+                .userId(user.getId())
+                .userNom(user.getNom())
+                .userPrenom(user.getPrenom())
+                .userEmail(user.getEmail())
                 .actionType(ActionType.LOGIN)
                 .description("Connexion utilisateur")
                 .pays(user.getPays())

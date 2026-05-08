@@ -1,25 +1,17 @@
-# Dockerfile pour le Backend Spring Boot
-FROM maven:3.9.6-openjdk-8 AS builder
-
+FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /app
 
-# Copier les fichiers du projet
-COPY pom.xml .
+COPY pom.xml ./
 COPY src ./src
+RUN mvn -q -DskipTests package
 
-# Compiler et builder l'application
-RUN mvn clean package -DskipTests
-
-# Stage 2 : Runtime
-FROM openjdk:8-jre-slim
-
+FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
+COPY --from=build /app/target/*.jar /app/app.jar
 
-# Copier le JAR compilé depuis le builder
-COPY --from=builder /app/target/*.jar app.jar
+# Wait-for-DB entrypoint (robust startup)
+COPY docker/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-# Exposer le port 8080
 EXPOSE 8080
-
-# Lancer l'application
-ENTRYPOINT ["java", "-jar", "app.jar"]
+ENTRYPOINT ["/app/entrypoint.sh"]

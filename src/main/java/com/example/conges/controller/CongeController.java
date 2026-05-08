@@ -116,7 +116,9 @@ public class CongeController {
     public ResponseEntity<DemandeCongeResponse> creerDemande(
             @AuthenticationPrincipal UserEntity user,
             @Valid @RequestBody DemandeCongeRequest request) {
-        
+        if (user == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
         DemandeCongeResponse response = congeService.creerDemande(user.getId(), request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }

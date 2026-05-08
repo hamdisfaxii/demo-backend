@@ -80,7 +80,10 @@ class HistoryControllerTest {
 
         History history = History.builder()
                 .id(1L)
-                .user(user)
+                .userId(user.getId())
+                .userNom(user.getNom())
+                .userPrenom(user.getPrenom())
+                .userEmail(user.getEmail())
                 .actionType(ActionType.CREATE)
                 .description("Demande créée")
                 .actionDate(LocalDateTime.now())

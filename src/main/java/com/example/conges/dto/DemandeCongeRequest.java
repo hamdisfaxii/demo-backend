@@ -1,10 +1,12 @@
 package com.example.conges.dto;
 
 import com.example.conges.entity.TypeConge;
+import com.fasterxml.jackson.annotation.JsonAlias;
 import javax.validation.constraints.NotBlank;
 import javax.validation.constraints.NotNull;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import com.example.conges.entity.HalfDay;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -26,14 +28,24 @@ public class DemandeCongeRequest {
     @NotNull(message = "La date de fin est obligatoire")
     private LocalDate dateFin;
 
-    // Accepte commentaire ou motif indifféremment
+    /** Texte libre ; le front envoie souvent {@code "motif"} au lieu de {@code "commentaire"}. */
+    @JsonAlias({"motif"})
     private String commentaire;
 
     private LocalTime heureDebut;
     private LocalTime heureFin;
 
+    /** Demi-journée début (matin/après-midi). */
+    private HalfDay startHalfDay;
+
+    /** Demi-journée fin (matin/après-midi). */
+    private HalfDay endHalfDay;
+
     /** True uniquement depuis l’écran « permission / sortie courte » (sécurise l’API). */
     private Boolean demandeSortieCourte;
+
+    /** Sélection d'un Super Admin (champ « Approuvé par »). */
+    private Long approvedByAdminId;
 
     public boolean isDemandeSortieCourte() {
         return Boolean.TRUE.equals(demandeSortieCourte);

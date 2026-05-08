@@ -18,6 +18,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
+import java.util.Objects;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -39,6 +40,11 @@ public class DemandeConge {
     @JoinColumn(name = "user_id", nullable = false)
     private UserEntity user;
 
+    /** Super Admin désigné pour suivi/validation (champ métier « Approuvé par »). */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "approved_by_admin_id")
+    private UserEntity approvedBy;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "type_conge", nullable = false, length = 32)
     private TypeConge typeConge;
@@ -51,6 +57,21 @@ public class DemandeConge {
 
     @Column(name = "nombre_jours", nullable = false)
     private int nombreJours;
+
+    /**
+     * Durée exacte en jours ouvrés (ex: 0.5 pour demi-journée).
+     * Si null : on retombe sur {@link #nombreJours}.
+     */
+    @Column(name = "nombre_jours_exact", precision = 10, scale = 2)
+    private Double nombreJoursExact;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "start_half_day", length = 16)
+    private HalfDay startHalfDay;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "end_half_day", length = 16)
+    private HalfDay endHalfDay;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 32)
@@ -134,9 +155,71 @@ public class DemandeConge {
                 && dureePermissionMinutes != null
                 && dureePermissionMinutes > 0) {
             nombreJours = 0;
+            nombreJoursExact = 0d;
             return;
         }
-        nombreJours = calculerJoursOuvrables(dateDebut, dateFin);
+        double exact = calculerJoursOuvrablesExact(dateDebut, dateFin, startHalfDay, endHalfDay);
+        nombreJoursExact = exact;
+        // Compat : garder un entier non négatif (historique/UI legacy).
+        nombreJours = Math.max(0, (int) Math.round(exact));
+    }
+
+    /**
+     * Durée exacte en jours ouvrés (lun–ven) avec demi-journées possibles.
+     * Règles :
+     * - Si demi-journée (start/end) fournie, elle ne s'applique que si la date correspondante est ouvrée.
+     * - Interdit : même date avec start=AFTERNOON et end=MORNING.
+     */
+    public static double calculerJoursOuvrablesExact(
+            LocalDate debut,
+            LocalDate fin,
+            HalfDay startHalf,
+            HalfDay endHalf
+    ) {
+        if (debut == null || fin == null || fin.isBefore(debut)) {
+            return 0d;
+        }
+        int days = calculerJoursOuvrables(debut, fin);
+        if (days <= 0) return 0d;
+
+        boolean startIsWorkday = isWorkday(debut);
+        boolean endIsWorkday = isWorkday(fin);
+
+        // Cas même jour
+        if (Objects.equals(debut, fin)) {
+            if (!startIsWorkday) return 0d;
+            if (startHalf == null && endHalf == null) return 1d;
+            HalfDay s = startHalf == null ? HalfDay.MORNING : startHalf;
+            HalfDay e = endHalf == null ? HalfDay.AFTERNOON : endHalf;
+            if (s == HalfDay.AFTERNOON && e == HalfDay.MORNING) return 0d; // invalide => traité comme 0
+            if (s == HalfDay.MORNING && e == HalfDay.MORNING) return 0.5d;
+            if (s == HalfDay.AFTERNOON && e == HalfDay.AFTERNOON) return 0.5d;
+            return 1d;
+        }
+
+        double exact = days;
+        if (startHalf != null && startIsWorkday) {
+            // demi-journée au début => -0.5
+            exact -= 0.5d;
+        }
+        if (endHalf != null && endIsWorkday) {
+            // demi-journée à la fin => -0.5
+            exact -= 0.5d;
+        }
+        return Math.max(0d, exact);
+    }
+
+    private static boolean isWorkday(LocalDate d) {
+        DayOfWeek dow = d.getDayOfWeek();
+        return dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY;
+    }
+
+    /** Durée exacte (fallback sur entier si exact absent). */
+    public double getNombreJoursExactOrInt() {
+        if (nombreJoursExact == null || nombreJoursExact.isNaN() || nombreJoursExact.isInfinite()) {
+            return Math.max(0, nombreJours);
+        }
+        return Math.max(0d, nombreJoursExact);
     }
 
     public static int minutesBetween(LocalTime start, LocalTime end) {

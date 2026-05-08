@@ -31,6 +31,7 @@ import java.sql.SQLException;
 import java.time.LocalDate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -44,8 +45,11 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 /**
- * Service pour intégrer l'API Dolibarr
- * Récupère les employés depuis Dolibarr et les synchronise avec la base de données locale
+ * Intégration Dolibarr : API REST et accès SQL optionnel sur la base Dolibarr.
+ *
+ * <p>Dolibarr sert de <strong>référentiel de stockage</strong> (types, utilisateurs, soldes {@code nb_holiday} / API
+ * allocations). Il n’implémente pas les règles métier par pays ni les prorata : celles-ci sont calculées dans
+ * l’application. Ce service se charge de lire/écrire ces montants et de les recopier localement après synchro.
  */
 @Service
 @RequiredArgsConstructor
@@ -70,6 +74,8 @@ public class DolibarrService {
     private final DolibarrSyncLogService dolibarrSyncLogService;
     private final FranceRttLedgerService franceRttLedgerService;
     private final JdbcTemplate jdbcTemplate;
+    @Qualifier("dolibarrJdbcTemplate")
+    private final JdbcTemplate dolibarrJdbcTemplate;
     private final RestTemplate restTemplate = new RestTemplate();
 
     @Value("${dolibarr.database.table-prefix:llx_}")
@@ -179,11 +185,16 @@ public class DolibarrService {
             UserEntity existingUser = userRepository.findByDolibarrId(doliEmployee.getId())
                     .orElse(null);
 
+            String resolvedEmail = resolveEmployeeEmail(doliEmployee.getEmail(), doliEmployee.getId());
+
             if (existingUser != null) {
                 // Mise à jour de l'employé existant
                 existingUser.setNom(doliEmployee.getLastName());
                 existingUser.setPrenom(doliEmployee.getFirstName());
-                existingUser.setEmail(doliEmployee.getEmail());
+                // Ne jamais écraser par une valeur vide (sinon violation unique + perte d'info).
+                if (resolvedEmail != null && !resolvedEmail.isBlank()) {
+                    existingUser.setEmail(resolvedEmail);
+                }
                 existingUser.setPays(
                         normalizeToSupportedHrPays(
                                 resolveCountryCode(doliEmployee.getId(), doliEmployee)));
@@ -202,7 +213,7 @@ public class DolibarrService {
                 // Création d'un nouvel employé
                 UserEntity newUser = UserEntity.builder()
                         .dolibarrId(doliEmployee.getId())
-                        .email(doliEmployee.getEmail())
+                        .email(resolvedEmail)
                         .nom(doliEmployee.getLastName())
                         .prenom(doliEmployee.getFirstName())
                         .pays(normalizeToSupportedHrPays(
@@ -227,6 +238,20 @@ public class DolibarrService {
 
         log.info("Synchronisation Dolibarr complétée: {} employés synchronisés", syncCount);
         return syncCount;
+    }
+
+    private String resolveEmployeeEmail(String rawEmail, Long dolibarrId) {
+        String email = rawEmail != null ? rawEmail.trim() : "";
+        if (!email.isEmpty()) {
+            return email;
+        }
+        // Dolibarr peut renvoyer un utilisateur sans email (ou email vide). Le schéma local impose email UNIQUE NOT NULL,
+        // donc on génère une valeur stable et unique (par Dolibarr ID).
+        if (dolibarrId == null) {
+            // On ne peut pas générer un email unique stable -> on skip en amont si ça arrive
+            return "unknown-" + System.currentTimeMillis() + "@invalid.local";
+        }
+        return "dolibarr-" + dolibarrId + "@invalid.local";
     }
 
     /**
@@ -320,6 +345,23 @@ public class DolibarrService {
     }
 
     /**
+     * Fallback DB: types de congés depuis la table dictionnaire Dolibarr (llx_c_holiday_types).
+     * Utile quand les endpoints REST varient selon versions/modules.
+     */
+    public List<DolibarrLeaveTypeDto> getLeaveTypesFromDolibarrDb() {
+        String prefix = (dolibarrTablePrefix == null || dolibarrTablePrefix.isBlank()) ? "llx_" : dolibarrTablePrefix;
+        String sql = "SELECT rowid, code, label, active FROM " + prefix + "c_holiday_types";
+        return dolibarrJdbcTemplate.query(sql, (rs, __) -> {
+            DolibarrLeaveTypeDto dto = new DolibarrLeaveTypeDto();
+            dto.setId(rs.getLong("rowid"));
+            dto.setCode(rs.getString("code"));
+            dto.setLibelle(rs.getString("label"));
+            dto.setActive(rs.getInt("active"));
+            return dto;
+        });
+    }
+
+    /**
      * Récupère la liste des jours fériés depuis Dolibarr
      */
     public List<DolibarrHolidayDto> getHolidaysFromDolibarr() {
@@ -328,39 +370,51 @@ public class DolibarrService {
             return new ArrayList<>();
         }
 
-        try {
-            // Note: Le endpoint varie selon la version Dolibarr
-            // Peut être: /holidays, /bank_holidays, /leaves/holidays
-            String url = dolibarrUrl + "/holidays?sortfield=rowid&sortorder=ASC&limit=500";
-            HttpHeaders headers = createHeaders();
-            HttpEntity<?> entity = new HttpEntity<>(headers);
+        HttpHeaders headers = createHeaders();
+        HttpEntity<?> entity = new HttpEntity<>(headers);
+        List<String> attempts = List.of(
+                dolibarrUrl + "/holidays?sortfield=rowid&sortorder=ASC&limit=500",
+                dolibarrUrl + "/bank_holidays?sortfield=rowid&sortorder=ASC&limit=500",
+                dolibarrUrl + "/leaves/holidays?sortfield=rowid&sortorder=ASC&limit=500"
+        );
 
-            ResponseEntity<DolibarrHolidayDto[]> response = restTemplate.exchange(
-                    url,
-                    HttpMethod.GET,
-                    entity,
-                    DolibarrHolidayDto[].class
-            );
+        RestClientException last = null;
+        for (String url : attempts) {
+            try {
+                ResponseEntity<DolibarrHolidayDto[]> response = restTemplate.exchange(
+                        url,
+                        HttpMethod.GET,
+                        entity,
+                        DolibarrHolidayDto[].class
+                );
 
-            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
-                log.info("Récupération de {} jours fériés depuis Dolibarr", response.getBody().length);
-                return List.of(response.getBody());
+                if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                    log.info("Récupération de {} jours fériés depuis Dolibarr", response.getBody().length);
+                    return List.of(response.getBody());
+                }
+            } catch (RestClientException e) {
+                last = e;
             }
-
-            log.warn("Aucun jour férié trouvé sur Dolibarr");
-            return new ArrayList<>();
-
-        } catch (RestClientException e) {
-            log.error("Erreur lors de la récupération des jours fériés: {}", e.getMessage());
-            return new ArrayList<>();
         }
+
+        log.warn("Aucun jour férié trouvé sur Dolibarr{}", last != null ? (": " + last.getMessage()) : "");
+        return new ArrayList<>();
     }
 
     /**
      * Récupère les allocations depuis l’API REST Dolibarr (toutes, ou filtre optionnel fk_user selon versions).
      */
     public List<DolibarrLeaveAllocationDto> getLeaveAllocationsFromDolibarr() {
-        return fetchLeaveAllocationsFromDolibarrApi(null);
+        List<DolibarrLeaveAllocationDto> fromApi = fetchLeaveAllocationsFromDolibarrApi(null);
+        if (!fromApi.isEmpty()) return fromApi;
+        // Fallback DB (Dolibarr <= 23.x peut ne pas exposer allocations via REST)
+        try {
+            List<DolibarrLeaveAllocationDto> fromDb = fetchLeaveAllocationsFromDolibarrDb();
+            return fromDb != null ? fromDb : List.of();
+        } catch (RuntimeException ex) {
+            log.warn("Fallback DB allocations Dolibarr indisponible: {}", ex.getMessage());
+            return fromApi;
+        }
     }
 
     /**
@@ -413,6 +467,43 @@ public class DolibarrService {
 
         log.debug("REST allocations Dolibarr indisponibles: {}", last == null ? "aucune réponse utile" : last.getMessage());
         return new ArrayList<>();
+    }
+
+    /**
+     * Fallback DB: soldes depuis llx_holiday_users (nb_holiday) + types llx_c_holiday_types.
+     * On projette ces soldes en DolibarrLeaveAllocationDto pour réutiliser la même pipeline de sync.
+     */
+    private List<DolibarrLeaveAllocationDto> fetchLeaveAllocationsFromDolibarrDb() {
+        String prefix = (dolibarrTablePrefix == null || dolibarrTablePrefix.isBlank()) ? "llx_" : dolibarrTablePrefix;
+        String sql = "SELECT hu.fk_user, hu.fk_type, hu.nb_holiday " +
+                "FROM " + prefix + "holiday_users hu";
+        int year = java.time.Year.now().getValue();
+        return dolibarrJdbcTemplate.query(sql, (rs, __) -> {
+            long userId = rs.getLong("fk_user");
+            long typeId = rs.getLong("fk_type");
+            double balance = rs.getDouble("nb_holiday");
+            DolibarrLeaveAllocationDto dto = new DolibarrLeaveAllocationDto();
+            dto.setEmployeeId(userId);
+            dto.setTypeCongeId(typeId);
+            dto.setJoursDisponibles(balance);
+            dto.setJoursInitiaux(balance);
+            dto.setJoursUtilises(0d);
+            dto.setAnnee(year);
+            dto.setActive(1);
+            // Fenêtre annuelle obligatoire pour employee_leave_allocations (NOT NULL en base)
+            dto.setDateDebut(java.time.LocalDate.of(year, 1, 1));
+            dto.setDateFin(java.time.LocalDate.of(year, 12, 31));
+            // Stable synthetic ID (unique within instance)
+            dto.setId(userId * 1000000L + typeId);
+            return dto;
+        });
+    }
+
+    public long dolibarrDbHolidayUsersCount() {
+        String prefix = (dolibarrTablePrefix == null || dolibarrTablePrefix.isBlank()) ? "llx_" : dolibarrTablePrefix;
+        String sql = "SELECT COUNT(*) FROM " + prefix + "holiday_users";
+        Long v = dolibarrJdbcTemplate.queryForObject(sql, Long.class);
+        return v == null ? 0L : v;
     }
 
     /**
@@ -877,22 +968,136 @@ public class DolibarrService {
     private record HolidayJdbcTypeRow(long rowid, String code, String label, Integer delay, Integer activeFlag) {
     }
 
-    private boolean updateHolidayUserBalanceJdbc(Long fkUserDolibarr, Long fkType, double qtyAvailable) {
+    /**
+     * Met à jour (ou insère) {@code nb_holiday} dans la table Dolibarr {@code holiday_users}.
+     * Utilise {@link #dolibarrJdbcTemplate} car la base Dolibarr est distincte de {@code conges_db}.
+     */
+    private boolean upsertHolidayUserBalanceJdbc(Long fkUserDolibarr, Long fkType, double qtyAvailable) {
         if (fkUserDolibarr == null || fkType == null) {
             return false;
         }
         String tbl = qualifiedDolibarrTableName("holiday_users");
         try {
             String sql = "UPDATE `" + tbl + "` SET nb_holiday = ? WHERE fk_user = ? AND fk_type = ?";
-            int n = jdbcTemplate.update(sql, qtyAvailable, fkUserDolibarr, fkType);
-            return n > 0;
+            int n = dolibarrJdbcTemplate.update(sql, qtyAvailable, fkUserDolibarr, fkType);
+            if (n > 0) {
+                return true;
+            }
+            try {
+                String ins =
+                        "INSERT INTO `"
+                                + tbl
+                                + "` (entity, fk_user, fk_type, nb_holiday) VALUES (1, ?, ?, ?) "
+                                + "ON DUPLICATE KEY UPDATE nb_holiday = VALUES(nb_holiday)";
+                dolibarrJdbcTemplate.update(ins, fkUserDolibarr, fkType, qtyAvailable);
+                return true;
+            } catch (Exception insertEx) {
+                String insNoEntity =
+                        "INSERT INTO `"
+                                + tbl
+                                + "` (fk_user, fk_type, nb_holiday) VALUES (?, ?, ?) "
+                                + "ON DUPLICATE KEY UPDATE nb_holiday = VALUES(nb_holiday)";
+                dolibarrJdbcTemplate.update(insNoEntity, fkUserDolibarr, fkType, qtyAvailable);
+                return true;
+            }
         } catch (Exception ex) {
             log.warn(
-                    "UPDATE {} (nb_holiday) fk_user={}, fk_type={} : {}",
+                    "UPSERT {} (nb_holiday) fk_user={}, fk_type={} : {}",
                     tbl,
                     fkUserDolibarr,
                     fkType,
                     ex.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Après correction RH sur les soldes : recopie la ligne locale vers Dolibarr (REST si {@code rowid} positif,
+     * sinon table {@code holiday_users}) pour que la prochaine synchro / login relise cette valeur.
+     */
+    public boolean pushHrBalanceToDolibarr(EmployeeLeaveAllocation allocation) {
+        if (!isDolibarrConfigured() || allocation == null) {
+            return false;
+        }
+        UserEntity user = allocation.getEmployee();
+        LeaveType lt = allocation.getLeaveType();
+        if (user == null || lt == null || user.getDolibarrId() == null || lt.getDolibarrLeaveTypeId() == null) {
+            log.warn(
+                    "pushHrBalanceToDolibarr: liaison Dolibarr incomplète (allocation id={}, fk_user={}, fk_type={})",
+                    allocation.getId(),
+                    user != null ? user.getDolibarrId() : null,
+                    lt != null ? lt.getDolibarrLeaveTypeId() : null);
+            return false;
+        }
+        Long fkUser = user.getDolibarrId();
+        Long fkType = lt.getDolibarrLeaveTypeId();
+        Long remoteId = allocation.getDolibarrAllocationId();
+
+        double avail = allocation.getJoursDisponibles() != null ? allocation.getJoursDisponibles() : 0d;
+        double used = allocation.getJoursUtilises() != null ? allocation.getJoursUtilises() : 0d;
+        double init = allocation.getJoursInitiaux() != null ? allocation.getJoursInitiaux() : used + avail;
+
+        boolean ok;
+        if (remoteId != null && remoteId > 0) {
+            ok = putLeaveAllocationViaRest(remoteId, used, avail, init);
+            if (!ok) {
+                ok = upsertHolidayUserBalanceJdbc(fkUser, fkType, avail);
+            }
+        } else {
+            ok = upsertHolidayUserBalanceJdbc(fkUser, fkType, avail);
+        }
+
+        Map<String, Object> payload =
+                Map.of(
+                        "fk_user",
+                        fkUser,
+                        "fk_type",
+                        fkType,
+                        "qty_available",
+                        avail,
+                        "qty_used",
+                        used,
+                        "qty_init",
+                        init);
+
+        if (ok) {
+            dolibarrSyncLogService.logSuccess(
+                    "LEAVE_ALLOCATION",
+                    "HR_BALANCE_PUSH",
+                    allocation.getId(),
+                    remoteId != null && remoteId > 0 ? remoteId : null,
+                    SyncDirection.OUTBOUND,
+                    payload);
+        } else {
+            dolibarrSyncLogService.logFailure(
+                    "LEAVE_ALLOCATION",
+                    "HR_BALANCE_PUSH",
+                    allocation.getId(),
+                    remoteId,
+                    SyncDirection.OUTBOUND,
+                    "Échec écriture Dolibarr (REST ou base holiday_users)",
+                    payload);
+        }
+        return ok;
+    }
+
+    private boolean putLeaveAllocationViaRest(Long allocationRemoteId, double used, double avail, double init) {
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("qty_used", used);
+            payload.put("qty_available", avail);
+            payload.put("qty_init", init);
+
+            String url = dolibarrUrl + "/leaves/allocations/" + allocationRemoteId;
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(payload, createHeaders());
+            ResponseEntity<Map> response =
+                    restTemplate.exchange(url, HttpMethod.PUT, entity, Map.class);
+            return response.getStatusCode().is2xxSuccessful();
+        } catch (RestClientException e) {
+            log.warn(
+                    "PUT allocation Dolibarr id={} : {} — repli JDBC holiday_users si possible.",
+                    allocationRemoteId,
+                    e.getMessage());
             return false;
         }
     }
@@ -933,8 +1138,9 @@ public class DolibarrService {
         }
 
         EmployeeLeaveAllocation allocation = allocationOpt.get();
-        double nextUsed = (allocation.getJoursUtilises() == null ? 0D : allocation.getJoursUtilises()) + demande.getNombreJours();
-        double nextAvailable = (allocation.getJoursDisponibles() == null ? 0D : allocation.getJoursDisponibles()) - demande.getNombreJours();
+        double requested = demande.getNombreJoursExactOrInt();
+        double nextUsed = (allocation.getJoursUtilises() == null ? 0D : allocation.getJoursUtilises()) + requested;
+        double nextAvailable = (allocation.getJoursDisponibles() == null ? 0D : allocation.getJoursDisponibles()) - requested;
         if (nextAvailable < 0) {
             dolibarrSyncLogService.logFailure(
                     "LEAVE_ALLOCATION",
@@ -943,7 +1149,7 @@ public class DolibarrService {
                     allocation.getDolibarrAllocationId(),
                     SyncDirection.OUTBOUND,
                     "Solde Dolibarr insuffisant",
-                    Map.of("requestedDays", demande.getNombreJours(), "available", allocation.getJoursDisponibles())
+                    Map.of("requestedDays", requested, "available", allocation.getJoursDisponibles())
             );
             return false;
         }
@@ -957,7 +1163,7 @@ public class DolibarrService {
         boolean updated;
         if (allocationRemoteId != null && allocationRemoteId < 0) {
             updated =
-                    updateHolidayUserBalanceJdbc(
+                    upsertHolidayUserBalanceJdbc(
                             demande.getUser().getDolibarrId(),
                             allocation.getLeaveType().getDolibarrLeaveTypeId(),
                             nextAvailable);
@@ -1243,8 +1449,11 @@ public class DolibarrService {
     }
 
     /**
-     * Lorsque vrai : les quotas affichés / contrôlés doivent refléter les allocations synchronisées Dolibarr pour cet utilisateur,
-     * et la consommation définitive se fait dans la BD Dolibarr à l’approbation.
+     * Indique si l’utilisateur est lié à Dolibarr (API configurée) : les <strong>montants</strong> de solde utilisés
+     * pour contrôler les demandes viennent alors des {@linkplain com.example.conges.entity.EmployeeLeaveAllocation
+     * allocations locales} alimentées par la synchro (reflétant ce qui est stocké dans Dolibarr), et non d’un
+     * « calcul pays » interne pour le même flux. Dolibarr ne calcule pas les règles TN/MA/FR : il enregistre et
+     * renvoie des quantités ; la consommation définitive peut être répercutée vers Dolibarr à l’approbation.
      */
     public boolean isLeaveBalanceFromDolibarr(UserEntity user) {
         return user != null && user.getDolibarrId() != null && isDolibarrConfigured();

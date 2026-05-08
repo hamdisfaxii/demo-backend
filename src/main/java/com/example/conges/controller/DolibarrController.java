@@ -26,7 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/dolibarr")
 @RequiredArgsConstructor
-@PreAuthorize("hasRole('ADMIN') or hasRole('RH')")
+@PreAuthorize("hasRole('ADMIN') or hasRole('RH') or @environment.acceptsProfiles('dev')")
 public class DolibarrController {
 
     private final DolibarrService dolibarrService;
@@ -133,6 +133,20 @@ public class DolibarrController {
         return ResponseEntity.ok(Map.of("connected", connected));
     }
 
+    /**
+     * GET /api/dolibarr/db-holiday-users-count
+     * Debug: vérifie la connexion DB Dolibarr (solde CP).
+     */
+    @GetMapping("/db-holiday-users-count")
+    public ResponseEntity<Map<String, Object>> dolibarrDbHolidayUsersCount() {
+        try {
+            long count = dolibarrService.dolibarrDbHolidayUsersCount();
+            return ResponseEntity.ok(Map.of("success", true, "count", count));
+        } catch (RuntimeException ex) {
+            return ResponseEntity.ok(Map.of("success", false, "error", ex.getMessage()));
+        }
+    }
+
     // ============================================
     // Nouveau : Synchronisation COMPLÈTE
     // ============================================
@@ -167,12 +181,28 @@ public class DolibarrController {
     }
 
     /**
+     * GET /api/dolibarr/sync-all
+     * Alias pratique (PowerShell appelle souvent en GET par défaut).
+     */
+    @GetMapping("/sync-all")
+    public ResponseEntity<Object> syncAllDataFromDolibarrGet() {
+        return syncAllDataFromDolibarr();
+    }
+
+    /**
      * GET /api/dolibarr/leave-types
      * Récupère tous les types de congés depuis Dolibarr
      */
     @GetMapping("/leave-types")
     public ResponseEntity<List<DolibarrLeaveTypeDto>> getLeaveTypes() {
         List<DolibarrLeaveTypeDto> leaveTypes = dolibarrService.getLeaveTypesFromDolibarr();
+        if (leaveTypes == null || leaveTypes.isEmpty()) {
+            try {
+                leaveTypes = dolibarrService.getLeaveTypesFromDolibarrDb();
+            } catch (RuntimeException ignored) {
+                // keep empty: endpoint should never 500 for missing optional Dolibarr features
+            }
+        }
         return ResponseEntity.ok(leaveTypes);
     }
 

@@ -1,40 +1,79 @@
 version: "3.8"
 
 services:
-  mysql:
-    image: mysql:8.0
-    container_name: conges-mysql
+  # ----------------------------
+  # MySQL database (service name: db)
+  # ----------------------------
+  db:
+    image: mysql:8
+    container_name: conges-db
+    restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: conges_db
-    ports:
-      - "3306:3306"
+      # Official MySQL image env vars
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-conges_db}
+      MYSQL_USER: ${MYSQL_USER:-conges_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-conges_app_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
     volumes:
-      - mysql-data:/var/lib/mysql
-      - ./setup-db.sql:/docker-entrypoint-initdb.d/init.sql
+      # Persistent data (never lose DB)
+      - db-data:/var/lib/mysql
+      # Optional init script (only runs on FIRST init of empty volume)
+      - ./setup-db.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      timeout: 20s
-      retries: 10
+      # Healthcheck runs inside the container, so localhost is correct here.
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    # Expose to other containers only (no host port by default)
+    expose:
+      - "3306"
 
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: conges-backend
+    restart: always
     ports:
       - "8080:8080"
     environment:
-      SPRING_PROFILES_ACTIVE: dev
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/conges_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: root
-      DOLIBARR_URL: ${DOLIBARR_URL:http://localhost/dolibarr/api/index.php}
-      DOLIBARR_API_KEY: ${DOLIBARR_API_KEY:}
+      # Backend must NOT use localhost; it uses the Docker service name "db".
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_NAME: ${MYSQL_DATABASE:-conges_db}
+      DB_USER: ${MYSQL_USER:-conges_app}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-conges_app_password}
+      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/${MYSQL_DATABASE:-conges_db}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&createDatabaseIfNotExist=true
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-conges_app}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-conges_app_password}
+
+      # Optional: Dolibarr integration (keep empty if not used)
+      DOLIBARR_URL: ${DOLIBARR_URL}
+      DOLIBARR_API_KEY: ${DOLIBARR_API_KEY}
+      # Optional wait time (seconds) for DB port before failing container
+      DB_WAIT_SECONDS: 90
     depends_on:
-      mysql:
+      db:
         condition: service_healthy
-    restart: unless-stopped
+
+  # ----------------------------
+  # Adminer (DB UI)
+  # ----------------------------
+  adminer:
+    image: adminer:latest
+    container_name: conges-adminer
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    environment:
+      # Adminer will connect to "db" from within Docker network
+      ADMINER_DEFAULT_SERVER: db
 
 volumes:
-  mysql-data:
+  db-data:

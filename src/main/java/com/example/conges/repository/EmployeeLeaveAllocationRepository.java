@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 @Repository
@@ -31,4 +32,16 @@ public interface EmployeeLeaveAllocationRepository extends JpaRepository<Employe
 
     @Query("SELECT SUM(a.joursDisponibles) FROM EmployeeLeaveAllocation a WHERE a.employee = :employee AND a.annee = :annee AND a.active = true")
     Double getTotalJoursDisponibles(UserEntity employee, Integer annee);
+
+    @Query("""
+            SELECT a
+            FROM EmployeeLeaveAllocation a
+            JOIN FETCH a.employee e
+            JOIN FETCH a.leaveType lt
+            WHERE e.id IN :employeeIds
+              AND a.annee = :annee
+            """)
+    List<EmployeeLeaveAllocation> findByEmployeeIdsAndAnnee(
+            @Param("employeeIds") List<Long> employeeIds,
+            @Param("annee") Integer annee);
 }

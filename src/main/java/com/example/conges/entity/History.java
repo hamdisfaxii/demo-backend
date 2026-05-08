@@ -4,12 +4,9 @@ import javax.persistence.Column;
 import javax.persistence.Entity;
 import javax.persistence.EnumType;
 import javax.persistence.Enumerated;
-import javax.persistence.FetchType;
 import javax.persistence.GeneratedValue;
 import javax.persistence.GenerationType;
 import javax.persistence.Id;
-import javax.persistence.JoinColumn;
-import javax.persistence.ManyToOne;
 import javax.persistence.PrePersist;
 import javax.persistence.Table;
 import java.time.LocalDateTime;
@@ -21,8 +18,8 @@ import lombok.NoArgsConstructor;
 /**
  * Entité pour tracer l'historique de toutes les actions sur les demandes de congés.
  * Logs automatiques et filtrage/export possibles.
- * <p>En base : éviter {@code ON DELETE CASCADE} sur {@code user_id} — supprimer un utilisateur
- * effacerait toutes ses lignes d’historique (problème fréquent en recréant les comptes en local).
+ * <p>Important : cette table est conçue pour être autonome (pas de FK vers {@code users} / {@code demandes_conge})
+ * afin de pouvoir fonctionner dans un mode "Dolibarr = source de vérité" et "MariaDB = historique seulement".
  */
 @Entity
 @Table(name = "history", indexes = {
@@ -41,13 +38,28 @@ public class History {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "user_id", nullable = false)
-    private UserEntity user;
+    /**
+     * Identifiant utilisateur (ex: ID Dolibarr, ou ID interne si existant).
+     * Pas de FK: on stocke un snapshot minimal et on reste découplé.
+     */
+    @Column(name = "user_id", nullable = false)
+    private Long userId;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "demande_id")
-    private DemandeConge demande;
+    @Column(name = "user_nom", length = 150)
+    private String userNom;
+
+    @Column(name = "user_prenom", length = 150)
+    private String userPrenom;
+
+    @Column(name = "user_email", length = 255)
+    private String userEmail;
+
+    /**
+     * Identifiant demande (si disponible).
+     * Pas de FK: la demande peut être gérée ailleurs (Dolibarr, autre service, etc.).
+     */
+    @Column(name = "demande_id")
+    private Long demandeId;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "action_type", nullable = false, length = 50)
@@ -94,6 +106,7 @@ public class History {
         DOCUMENT_SENT,    // Document envoyé
         EXPORTED,         // Export effectué
         SYNCED_DOLIBARR,  // Synchronisation avec Dolibarr
+        SUPERADMINS_NOTIFIED, // Email envoyé aux Super Admins
         LOGIN,            // Connexion utilisateur
         LOGOUT,           // Déconnexion utilisateur
         REPORT_VIEWED,    // Rapport consulté

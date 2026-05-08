@@ -8,6 +8,8 @@ import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 import java.nio.charset.StandardCharsets;
 import java.security.Key;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
@@ -64,12 +66,26 @@ public class JwtService {
     }
 
     private Key getSigningKey() {
+        byte[] keyBytes;
         try {
-            byte[] keyBytes = Decoders.BASE64.decode(jwtSecret);
-            return Keys.hmacShaKeyFor(keyBytes);
-        } catch (IllegalArgumentException ex) {
-            byte[] keyBytes = jwtSecret.getBytes(StandardCharsets.UTF_8);
-            return Keys.hmacShaKeyFor(keyBytes);
+            keyBytes = Decoders.BASE64.decode(jwtSecret);
+        } catch (Exception ignore) {
+            keyBytes = jwtSecret.getBytes(StandardCharsets.UTF_8);
+        }
+
+        // HS256 requires >= 256-bit key. If too short, derive a stable 256-bit key from the provided secret.
+        if (keyBytes.length < 32) {
+            keyBytes = sha256(keyBytes);
+        }
+
+        return Keys.hmacShaKeyFor(keyBytes);
+    }
+
+    private static byte[] sha256(byte[] input) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(input);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
         }
     }
 }

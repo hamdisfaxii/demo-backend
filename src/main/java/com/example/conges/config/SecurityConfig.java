@@ -35,7 +35,9 @@ public class SecurityConfig {
                                 new AntPathRequestMatcher("/api/auth/login"),
                                 new AntPathRequestMatcher("/api/auth/logout"),
                                 // Dev convenience: allow Dolibarr endpoints without JWT
-                                new AntPathRequestMatcher("/api/dolibarr/**")
+                                new AntPathRequestMatcher("/api/dolibarr/**"),
+                                // Dev convenience: allow dev endpoints for testing
+                                new AntPathRequestMatcher("/api/dev/**")
                         ).permitAll()
                         .anyRequest().authenticated()
                 )

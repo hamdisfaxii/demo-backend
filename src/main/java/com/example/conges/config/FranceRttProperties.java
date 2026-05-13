@@ -13,8 +13,8 @@ import org.springframework.stereotype.Component;
 public class FranceRttProperties {
 
     /** Moteur local actif pour soldes RTT FR (vérif solde + conso à validation). */
-    private boolean localLedgerEnabled = true;
+    private boolean localLedgerEnabled = false;
 
     /** Ne pas consommer l'allocation Dolibarr liée aux RTT quand le ledger local s'applique. */
-    private boolean skipDolibarrRttConsume = true;
+    private boolean skipDolibarrRttConsume = false;
 }

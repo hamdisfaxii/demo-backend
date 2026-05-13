@@ -47,6 +47,9 @@ public class DemandeCongeRequest {
     /** Sélection d'un Super Admin (champ « Approuvé par »). */
     private Long approvedByAdminId;
 
+    /** Congé exceptionnel: type configuré (par pays). */
+    private Long exceptionalLeaveConfigId;
+
     public boolean isDemandeSortieCourte() {
         return Boolean.TRUE.equals(demandeSortieCourte);
     }
@@ -57,6 +60,9 @@ public class DemandeCongeRequest {
             return TypeConge.PAYE;
         }
         String normalized = titre.toLowerCase().trim();
+        if (normalized.contains("exceptionnel")) {
+            return TypeConge.EXCEPTIONNEL;
+        }
         if (normalized.contains("maladie")) {
             return TypeConge.MALADIE;
         }

@@ -25,6 +25,7 @@ public class HrDecisionService {
 
     private final DemandeCongeRepository demandeCongeRepository;
     private final CongeService congeService;
+    private final CountryPolicyService countryPolicyService;
 
     @Transactional(readOnly = true)
     public List<HrLeaveRequestResponse> getPendingRequests(
@@ -120,7 +121,7 @@ public class HrDecisionService {
     @Transactional(readOnly = true)
     public Map<String, Long> getStats(UserEntity actor) {
         validateHrOrAdmin(actor);
-        String actorCountry = normalizeOptional(actor.getPays());
+        String actorCountry = normalizeBusinessCountryOptional(actor.getPays());
         if (actor.getRole() != Role.ADMIN && actorCountry == null) {
             throw new AccessDeniedException("Pays utilisateur introuvable.");
         }
@@ -169,8 +170,11 @@ public class HrDecisionService {
     }
 
     private void validateHrOrAdmin(UserEntity actor) {
-        if (actor == null || (actor.getRole() != Role.RH && actor.getRole() != Role.ADMIN)) {
-            throw new AccessDeniedException("Accès réservé aux rôles RH/ADMIN");
+        if (actor == null
+                || (actor.getRole() != Role.RH
+                    && actor.getRole() != Role.ADMIN
+                    && actor.getRole() != Role.MANAGER)) {
+            throw new AccessDeniedException("Accès réservé aux rôles RH/ADMIN/MANAGER");
         }
     }
 
@@ -178,7 +182,7 @@ public class HrDecisionService {
         if (actor.getRole() == Role.ADMIN) {
             return normalizeOptional(requestedCountry);
         }
-        String actorCountry = normalizeOptional(actor.getPays());
+        String actorCountry = normalizeBusinessCountryOptional(actor.getPays());
         if (actorCountry == null) {
             throw new AccessDeniedException("Pays utilisateur introuvable.");
         }
@@ -189,11 +193,19 @@ public class HrDecisionService {
         if (actor.getRole() == Role.ADMIN) {
             return;
         }
-        String actorCountry = normalizeOptional(actor.getPays());
-        String requestCountry = demande.getUser() == null ? null : normalizeOptional(demande.getUser().getPays());
+        String actorCountry = normalizeBusinessCountryOptional(actor.getPays());
+        String requestCountry =
+                demande.getUser() == null ? null : normalizeBusinessCountryOptional(demande.getUser().getPays());
         if (actorCountry == null || requestCountry == null || !actorCountry.equalsIgnoreCase(requestCountry)) {
             throw new AccessDeniedException("Accès refusé: demande d'un autre pays.");
         }
+    }
+
+    private String normalizeBusinessCountryOptional(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return countryPolicyService.normalizeBusinessCountry(value);
     }
 
     private HrLeaveRequestResponse toHrResponse(DemandeConge d) {

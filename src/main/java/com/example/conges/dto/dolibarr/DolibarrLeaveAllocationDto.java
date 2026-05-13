@@ -27,6 +27,10 @@ public class DolibarrLeaveAllocationDto {
     @JsonAlias({ "fk_type", "fk_holiday_type", "type_id" })
     private Long typeCongeId;
 
+    @JsonProperty("leave_type_code")
+    @JsonAlias({ "type_code", "code" })
+    private String typeCongeCode;
+
     @JsonProperty("qty_init")
     @JsonAlias({ "qty_total", "nb_init" })
     private Double joursInitiaux;

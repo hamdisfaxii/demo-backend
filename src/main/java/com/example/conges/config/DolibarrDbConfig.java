@@ -23,10 +23,10 @@ public class DolibarrDbConfig {
             @Value("${dolibarr.db.password:}") String password
     ) {
         // Empty host/name means "not configured" -> we still create a DS to fail fast if used.
-        String url = "jdbc:mariadb://" + host + ":" + port + "/" + dbName
+        String url = "jdbc:mysql://" + host + ":" + port + "/" + dbName
                 + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC";
         return DataSourceBuilder.create()
-                .driverClassName("org.mariadb.jdbc.Driver")
+                .driverClassName("com.mysql.cj.jdbc.Driver")
                 .url(url)
                 .username(user)
                 .password(password)

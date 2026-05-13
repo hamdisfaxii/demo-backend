@@ -269,9 +269,15 @@ public class HrLeaveBalanceService {
             case PAYE -> List.of(
                     "paye", "paid", "conge_paye", "conges_payes", "cp", "vacation", "annual", "annuel",
                     "holiday", "leave", "conge", "conges", "absence", "time off", "pto", "paid leave");
-            case MALADIE -> List.of("maladie", "sick", "medical", "incapacity", "arret", "arrêt");
-            case SANS_SOLDE -> List.of("sans solde", "unpaid", "sans_solde", "without", "wo pay", "unpay");
-            case COURTE_DUREE -> List.of("courte", "permission", "rtt", "short", "hour", "heure", "demi");
+            case MALADIE -> List.of(
+                    "maladie", "sick", "medical", "med", "incapacity", "incapacite", "incapacité",
+                    "arret", "arrêt", "arret maladie", "arrêt maladie", "illness");
+            case SANS_SOLDE -> List.of(
+                    "sans solde", "unpaid", "sans_solde", "without", "wo pay", "unpay", "autre", "other");
+            case COURTE_DUREE -> List.of(
+                    "courte", "permission", "rtt", "short", "hour", "heure", "demi",
+                    "recup", "récup", "recuperation", "récupération", "recovery", "compens", "compensation",
+                    "repos compensateur", "time in lieu");
             default -> List.of();
         };
         return base.stream().map(this::normalize).distinct().toList();

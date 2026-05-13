@@ -26,7 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping({ "/api/rh/requests", "/api/hr/requests" })
 @RequiredArgsConstructor
-@PreAuthorize("hasAnyRole('RH','ADMIN')")
+@PreAuthorize("hasAnyRole('RH','ADMIN','MANAGER')")
 public class HrDecisionController {
 
     private final HrDecisionService hrDecisionService;

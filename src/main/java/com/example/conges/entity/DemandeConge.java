@@ -49,6 +49,10 @@ public class DemandeConge {
     @Column(name = "type_conge", nullable = false, length = 32)
     private TypeConge typeConge;
 
+    /** Congé exceptionnel: référence à la configuration RH (par pays). */
+    @Column(name = "exceptional_leave_config_id")
+    private Long exceptionalLeaveConfigId;
+
     @Column(name = "date_debut", nullable = false)
     private LocalDate dateDebut;
 

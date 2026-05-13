@@ -166,6 +166,14 @@ public class HrConfigController {
         return ResponseEntity.ok(hrConfigService.updateExceptionalLeave(id, payload));
     }
 
+    @DeleteMapping("/exceptional-leaves/{id}")
+    public ResponseEntity<Map<String, Object>> deleteExceptionalLeave(
+            @PathVariable Long id
+    ) {
+        hrConfigService.deleteExceptionalLeave(id);
+        return ResponseEntity.ok(Map.of("success", true, "deletedId", id));
+    }
+
     @GetMapping("/public-holidays")
     public ResponseEntity<List<Holiday>> getPublicHolidays(
             @AuthenticationPrincipal UserEntity user,

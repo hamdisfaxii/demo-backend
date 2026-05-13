@@ -15,6 +15,7 @@ import com.example.conges.repository.UserRepository;
 import java.time.LocalDate;
 import java.time.Year;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javax.persistence.EntityNotFoundException;
@@ -77,6 +78,13 @@ public class HrConfigService {
     @Transactional(readOnly = true)
     public List<ExceptionalLeaveConfig> getExceptionalLeavesByCountry(String countryCode) {
         String normalized = countryCode == null ? "TN" : countryCode.trim().toUpperCase();
+        List<ExceptionalLeaveConfig> existing =
+                exceptionalLeaveConfigRepository.findByCountryCodeOrderByLabelAsc(normalized);
+        if (existing != null && !existing.isEmpty()) {
+            return existing;
+        }
+        // Auto-seed minimal defaults per country so RH sees a usable starting point.
+        seedDefaultExceptionalLeavesIfMissing(normalized);
         return exceptionalLeaveConfigRepository.findByCountryCodeOrderByLabelAsc(normalized);
     }
 
@@ -115,6 +123,55 @@ public class HrConfigService {
             existing.setEnabled(payload.getEnabled());
         }
         return exceptionalLeaveConfigRepository.save(existing);
+    }
+
+    @Transactional
+    public void deleteExceptionalLeave(Long id) {
+        if (id == null) return;
+        exceptionalLeaveConfigRepository.deleteById(id);
+    }
+
+    @Transactional
+    protected void seedDefaultExceptionalLeavesIfMissing(String countryCode) {
+        String cc = countryCode == null ? "TN" : countryCode.trim().toUpperCase();
+        if (!exceptionalLeaveConfigRepository.findByCountryCodeOrderByLabelAsc(cc).isEmpty()) {
+            return;
+        }
+        // Default suggestions (RH can edit durations anytime).
+        Map<String, Integer> defaults = defaultExceptionalLeavesForCountry(cc);
+        for (Map.Entry<String, Integer> e : defaults.entrySet()) {
+            exceptionalLeaveConfigRepository.save(ExceptionalLeaveConfig.builder()
+                    .countryCode(cc)
+                    .label(e.getKey())
+                    .daysPerYear(Math.max(0, e.getValue() == null ? 0 : e.getValue()))
+                    .enabled(Boolean.TRUE)
+                    .build());
+        }
+    }
+
+    private Map<String, Integer> defaultExceptionalLeavesForCountry(String cc) {
+        Map<String, Integer> out = new LinkedHashMap<>();
+        switch (cc) {
+            case "FR" -> {
+                out.put("Congé mariage", 4);
+                out.put("Congé naissance / accouchement", 3);
+                out.put("Congé décès", 3);
+                out.put("Congé exceptionnel familial", 2);
+            }
+            case "MA" -> {
+                out.put("Congé mariage", 4);
+                out.put("Congé naissance / accouchement", 3);
+                out.put("Congé décès", 2);
+                out.put("Congé exceptionnel familial", 2);
+            }
+            default -> {
+                out.put("Congé mariage", 3);
+                out.put("Congé naissance / accouchement", 3);
+                out.put("Congé décès", 2);
+                out.put("Congé exceptionnel familial", 2);
+            }
+        }
+        return out;
     }
 
     @Transactional(readOnly = true)

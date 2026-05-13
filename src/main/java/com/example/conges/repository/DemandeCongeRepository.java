@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -138,6 +139,22 @@ public interface DemandeCongeRepository extends JpaRepository<DemandeConge, Long
             @Param("employeeId") Long employeeId,
             @Param("department") String department,
             @Param("country") String country
+    );
+
+    @Query("""
+            SELECT COALESCE(SUM(COALESCE(d.nombreJoursExact, d.nombreJours)), 0)
+            FROM DemandeConge d
+            WHERE d.user.id = :userId
+              AND d.typeConge = com.example.conges.entity.TypeConge.EXCEPTIONNEL
+              AND d.exceptionalLeaveConfigId = :configId
+              AND d.statut IN :statuts
+              AND YEAR(d.dateDebut) = :year
+            """)
+    double sumExceptionalDaysForUserAndConfig(
+            @Param("userId") Long userId,
+            @Param("configId") Long configId,
+            @Param("year") int year,
+            @Param("statuts") Collection<StatutConge> statuts
     );
 
     @Query("""

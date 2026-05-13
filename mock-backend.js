@@ -51,7 +51,9 @@ const DB_CONFIG = {
   queueLimit: 0,
 };
 
-const DOLIBARR_DB_TABLE_PREFIX = String(process.env.DOLIBARR_DB_TABLE_PREFIX ?? "llx_")
+const DOLIBARR_DB_TABLE_PREFIX = String(
+  process.env.DOLIBARR_DB_TABLE_PREFIX ?? "llx_",
+)
   .trim()
   .replace(/`/g, "");
 
@@ -61,7 +63,10 @@ function dolibarrQualifiedTable(part) {
     .replace(/^[`'"]|[`'"]$/g, "")
     .replace(/^llx_/i, "")
     .replace(/[^a-zA-Z0-9_]/g, "");
-  let pfx = String(DOLIBARR_DB_TABLE_PREFIX ?? "llx_").replace(/[^a-zA-Z0-9_]/g, "");
+  let pfx = String(DOLIBARR_DB_TABLE_PREFIX ?? "llx_").replace(
+    /[^a-zA-Z0-9_]/g,
+    "",
+  );
   if (!pfx) pfx = "llx";
   const p = pfx.endsWith("_") ? pfx : `${pfx}_`;
   return `${p}${base}`;
@@ -203,7 +208,7 @@ const typesCongePays = {
   FR: {
     CONGES_PAYES: { nom: "Congés Payés", jours: 25, code: "CP" },
     SORTIE_COURTE: { nom: "Sortie courte durée / RTT", jours: 10, code: "SCD" },
-    MALADIE: { nom: "Congé Maladie", jours: 0, code: "MAL" },
+    MALADIE: { nom: "Congé Maladie", jours: 7, code: "MAL" },
     PARENTAL: { nom: "Congé Parental", jours: 180, code: "PAR" },
     ENFANT_MALADE: { nom: "Congé Enfant Malade", jours: 5, code: "ENF" },
   },
@@ -317,8 +322,7 @@ function flattenDolibarrCountryPayload(u) {
         : typeof c.name === "string"
           ? c.name
           : null;
-    if (typeof lab === "string" && lab.trim())
-      u.country_label = lab.trim();
+    if (typeof lab === "string" && lab.trim()) u.country_label = lab.trim();
     const code = c.code ?? c.code_iso;
     if (code != null && String(code).trim()) {
       const cs = String(code).trim().toUpperCase();
@@ -373,8 +377,7 @@ async function resolveCountryIsoFromDolibarrSql(dolibarrUserRowid) {
     if (!rows || !rows.length) return null;
     const row = rows[0];
     const raw = row.c_code_iso ?? row.c_code ?? "";
-    let iso =
-      iso2FromAlpha3OrMixed(raw) || iso2FromCountryLabels(row.c_label);
+    let iso = iso2FromAlpha3OrMixed(raw) || iso2FromCountryLabels(row.c_label);
     return iso ? mapFrenchOverseasToFr(iso) : null;
   } catch (e) {
     console.warn("resolveCountryIsoFromDolibarrSql:", e.message);
@@ -422,7 +425,9 @@ function retardDebitLedgerKey(paysNorm) {
 }
 
 function retardDebitAmountJours(paysNorm) {
-  return paysNorm === "FR" ? FR_RETARD_RTT_DEBIT_JOURS : TNMA_RETARD_AUTORISATION_DEBIT;
+  return paysNorm === "FR"
+    ? FR_RETARD_RTT_DEBIT_JOURS
+    : TNMA_RETARD_AUTORISATION_DEBIT;
 }
 
 /** Droits maladie annuels selon configur pays (TN/MA : 7 j/an ; FR : 0 = hors carte décompte mock). */
@@ -457,14 +462,8 @@ function getSoldeRestantPourLedger(userId, ledgerKey, paysRaw) {
 function minutesBetweenHeures(hd, hf) {
   const re = /^\d{1,2}:\d{2}/;
   if (!re.test(String(hd || "")) || !re.test(String(hf || ""))) return NaN;
-  const [h1, m1] = String(hd)
-    .slice(0, 5)
-    .split(":")
-    .map(Number);
-  const [h2, m2] = String(hf)
-    .slice(0, 5)
-    .split(":")
-    .map(Number);
+  const [h1, m1] = String(hd).slice(0, 5).split(":").map(Number);
+  const [h2, m2] = String(hf).slice(0, 5).split(":").map(Number);
   if ([h1, m1, h2, m2].some((n) => !Number.isFinite(n))) return NaN;
   return h2 * 60 + m2 - (h1 * 60 + m1);
 }
@@ -479,7 +478,9 @@ function countMockNonFrShortHourlyInMonth(userId, dateDebutStr) {
   const mo = d0.getMonth();
   const inMonth = (ds) => {
     const d = new Date(`${ds}T12:00:00`);
-    return !Number.isNaN(d.getTime()) && d.getFullYear() === y && d.getMonth() === mo;
+    return (
+      !Number.isNaN(d.getTime()) && d.getFullYear() === y && d.getMonth() === mo
+    );
   };
   let utilisees = 0;
   let acceptees = 0;
@@ -495,14 +496,22 @@ function countMockNonFrShortHourlyInMonth(userId, dateDebutStr) {
     const st = String(d.statut || "").toUpperCase();
     if (st.includes("REFUS") || st.includes("ANNU")) continue;
     utilisees += 1;
-    if (st.includes("APPROUVE_RH") || st.includes("ACCEPTE") || st === "APPROUVE")
+    if (
+      st.includes("APPROUVE_RH") ||
+      st.includes("ACCEPTE") ||
+      st === "APPROUVE"
+    )
       acceptees += 1;
   }
   return { utilisees, acceptees, cap };
 }
 
 /** Compte uniquement les autorisations 2 h déjà acceptées (pour bloquer après le plafond mensuel). */
-function countAcceptedMockNonFrShortInMonth(userId, dateDebutStr, excludeDemandeId) {
+function countAcceptedMockNonFrShortInMonth(
+  userId,
+  dateDebutStr,
+  excludeDemandeId,
+) {
   const fixedMin = 120;
   const d0 = new Date(`${dateDebutStr}T12:00:00`);
   if (Number.isNaN(d0.getTime())) return 0;
@@ -510,11 +519,14 @@ function countAcceptedMockNonFrShortInMonth(userId, dateDebutStr, excludeDemande
   const mo = d0.getMonth();
   const inMonth = (ds) => {
     const d = new Date(`${ds}T12:00:00`);
-    return !Number.isNaN(d.getTime()) && d.getFullYear() === y && d.getMonth() === mo;
+    return (
+      !Number.isNaN(d.getTime()) && d.getFullYear() === y && d.getMonth() === mo
+    );
   };
   let acceptees = 0;
   for (const d of demandes) {
-    if (excludeDemandeId != null && Number(d.id) === Number(excludeDemandeId)) continue;
+    if (excludeDemandeId != null && Number(d.id) === Number(excludeDemandeId))
+      continue;
     if (Number(d.userId) !== Number(userId)) continue;
     if (!inMonth(d.dateDebut)) continue;
     if (normalizeCongeLedgerKey(d.typeConge) !== "SORTIE_COURTE") continue;
@@ -580,9 +592,24 @@ const joursFeriesPays = {
 };
 
 const scheduleTypeDefaults = {
-  NORMAL: { firstStart: "08:00", firstEnd: "12:00", secondStart: "13:00", secondEnd: "17:00" },
-  SUMMER: { firstStart: "08:00", firstEnd: "14:00", secondStart: null, secondEnd: null },
-  RAMADAN: { firstStart: "09:00", firstEnd: "15:00", secondStart: null, secondEnd: null },
+  NORMAL: {
+    firstStart: "08:00",
+    firstEnd: "12:00",
+    secondStart: "13:00",
+    secondEnd: "17:00",
+  },
+  SUMMER: {
+    firstStart: "08:00",
+    firstEnd: "14:00",
+    secondStart: null,
+    secondEnd: null,
+  },
+  RAMADAN: {
+    firstStart: "09:00",
+    firstEnd: "15:00",
+    secondStart: null,
+    secondEnd: null,
+  },
 };
 
 const buildDefaultScheduleRows = (type) =>
@@ -722,7 +749,9 @@ function mergePublicHolidayRows(country, rows, source = "internet") {
     if (!dateJour || !libelle) return;
 
     const existing = publicHolidaysStore[cc].find(
-      (h) => h.dateJour === dateJour && h.libelle.toLowerCase() === libelle.toLowerCase(),
+      (h) =>
+        h.dateJour === dateJour &&
+        h.libelle.toLowerCase() === libelle.toLowerCase(),
     );
 
     if (!existing) {
@@ -775,7 +804,9 @@ async function importOfficialPublicHolidaysForCountry(country, year) {
 
   let nagerRows = null;
   try {
-    const response = await fetch(`https://date.nager.at/api/v3/PublicHolidays/${y}/${cc}`);
+    const response = await fetch(
+      `https://date.nager.at/api/v3/PublicHolidays/${y}/${cc}`,
+    );
     if (response.ok) {
       const apiRows = await response.json();
       if (Array.isArray(apiRows) && apiRows.length > 0) {
@@ -922,7 +953,9 @@ const MOCK_PERSIST_VERSION = 1;
 const MOCK_PERSIST_DEBOUNCE_MS = 600;
 
 function mockPersistDisabled() {
-  const v = String(process.env.MOCK_PERSIST_DISABLE || "").trim().toLowerCase();
+  const v = String(process.env.MOCK_PERSIST_DISABLE || "")
+    .trim()
+    .toLowerCase();
   return v === "1" || v === "true" || v === "yes";
 }
 
@@ -1018,27 +1051,42 @@ function loadMockPersistSync() {
     if (data.users && typeof data.users === "object") {
       Object.assign(users, data.users);
     }
-    if (data.publicHolidaysStore && typeof data.publicHolidaysStore === "object") {
+    if (
+      data.publicHolidaysStore &&
+      typeof data.publicHolidaysStore === "object"
+    ) {
       restorePublicHolidaysStoreFromPersist(data.publicHolidaysStore);
     }
-    if (data.exceptionalLeavesByCountry && typeof data.exceptionalLeavesByCountry === "object") {
+    if (
+      data.exceptionalLeavesByCountry &&
+      typeof data.exceptionalLeavesByCountry === "object"
+    ) {
       for (const k of Object.keys(exceptionalLeavesByCountry)) {
         delete exceptionalLeavesByCountry[k];
       }
-      Object.assign(exceptionalLeavesByCountry, data.exceptionalLeavesByCountry);
+      Object.assign(
+        exceptionalLeavesByCountry,
+        data.exceptionalLeavesByCountry,
+      );
     }
     if (Array.isArray(data.workflowRules)) {
       workflowRules.length = 0;
       workflowRules.push(...data.workflowRules);
     }
-    if (data.workSchedulesByCountry && typeof data.workSchedulesByCountry === "object") {
+    if (
+      data.workSchedulesByCountry &&
+      typeof data.workSchedulesByCountry === "object"
+    ) {
       for (const k of Object.keys(workSchedulesByCountry)) {
         delete workSchedulesByCountry[k];
       }
       Object.assign(workSchedulesByCountry, data.workSchedulesByCountry);
     }
     if (Number.isFinite(Number(data.publicHolidaySeq))) {
-      publicHolidaySeq = Math.max(publicHolidaySeq, Number(data.publicHolidaySeq));
+      publicHolidaySeq = Math.max(
+        publicHolidaySeq,
+        Number(data.publicHolidaySeq),
+      );
     }
     console.log("✅ Données mock restaurées depuis:", p);
   } catch (e) {
@@ -1087,7 +1135,12 @@ function calculerJoursOuvrables(dateDebut, dateFin, pays) {
 }
 
 function validerDates(dateDebut, dateFin) {
-  if (dateDebut == null || dateFin == null || String(dateDebut).trim() === "" || String(dateFin).trim() === "") {
+  if (
+    dateDebut == null ||
+    dateFin == null ||
+    String(dateDebut).trim() === "" ||
+    String(dateFin).trim() === ""
+  ) {
     return { valid: false, error: "Dates de début et de fin obligatoires." };
   }
   const debut = new Date(dateDebut);
@@ -1096,7 +1149,11 @@ function validerDates(dateDebut, dateFin) {
     return { valid: false, error: "Format de date invalide." };
   }
 
-  const startDay = new Date(debut.getFullYear(), debut.getMonth(), debut.getDate());
+  const startDay = new Date(
+    debut.getFullYear(),
+    debut.getMonth(),
+    debut.getDate(),
+  );
   const endDay = new Date(fin.getFullYear(), fin.getMonth(), fin.getDate());
   if (startDay > endDay) {
     return { valid: false, error: "Date de début > date de fin" };
@@ -1105,7 +1162,10 @@ function validerDates(dateDebut, dateFin) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   if (startDay < today) {
-    return { valid: false, error: "La date de début ne peut pas être dans le passé." };
+    return {
+      valid: false,
+      error: "La date de début ne peut pas être dans le passé.",
+    };
   }
 
   return { valid: true };
@@ -1135,10 +1195,15 @@ function toRhRequestDto(demande) {
     dateSoumission: demande.dateCreation,
     workflowCode: "WF_DEFAULT",
     currentStepOrder: demande.workflow?.rh_status ? 3 : 2,
-    currentStepType: demande.workflow?.rh_status ? "ADMIN_APPROVAL" : "RH_APPROVAL",
+    currentStepType: demande.workflow?.rh_status
+      ? "ADMIN_APPROVAL"
+      : "RH_APPROVAL",
     employe: {
       id: employe.id,
-      nom: employe.fullName?.split(" ").slice(1).join(" ") || employe.fullName || "",
+      nom:
+        employe.fullName?.split(" ").slice(1).join(" ") ||
+        employe.fullName ||
+        "",
       prenom: employe.fullName?.split(" ")[0] || "",
       email: employe.email || "",
       country: employe.pays || "",
@@ -1184,7 +1249,9 @@ function buildAppUserFromDolibarrApiRow(dolibarrUser) {
 
   const rowid = Number(dolibarrUser.rowid ?? dolibarrUser.id);
   const userId =
-    Number.isFinite(rowid) && rowid > 0 ? rowid : Math.floor(Math.random() * 1000);
+    Number.isFinite(rowid) && rowid > 0
+      ? rowid
+      : Math.floor(Math.random() * 1000);
   const paysGuess = normalizePaysForQuota(
     isoCountryFromDolibarrPayload(dolibarrUser) || "TN",
   );
@@ -1192,7 +1259,8 @@ function buildAppUserFromDolibarrApiRow(dolibarrUser) {
   const user = {
     id: userId,
     email: String(dolibarrUser.email || dolibarrUser.login || "").trim(),
-    fullName: `${dolibarrUser.firstname || ""} ${dolibarrUser.lastname || ""}`.trim(),
+    fullName:
+      `${dolibarrUser.firstname || ""} ${dolibarrUser.lastname || ""}`.trim(),
     role,
     pays: paysGuess,
     departement: dolibarrUser.department || "General",
@@ -1288,13 +1356,17 @@ app.post("/api/auth/login", async (req, res) => {
     let dolibarrPasswordVerifiedEarly = false;
 
     const apiKeyTrim = String(DOLIBARR_API_KEY || "").trim();
-    const baseUrlTrim = String(DOLIBARR_URL || "").trim().replace(/\/+$/, "");
+    const baseUrlTrim = String(DOLIBARR_URL || "")
+      .trim()
+      .replace(/\/+$/, "");
 
     // 0. Si la liste /users échoue ou ne contient pas l’employé, Dolibarr accepte quand même /login avec login+mdp.
     if (apiKeyTrim && baseUrlTrim) {
-      const earlyCandidates = [email, email.toLowerCase(), email.toUpperCase()].filter(
-        (v, i, a) => a.indexOf(v) === i && String(v).trim().length > 0,
-      );
+      const earlyCandidates = [
+        email,
+        email.toLowerCase(),
+        email.toUpperCase(),
+      ].filter((v, i, a) => a.indexOf(v) === i && String(v).trim().length > 0);
       const early = await tryDolibarrLoginFirst(earlyCandidates, password);
       if (early.ok) {
         const uid = extractDolibarrRowIdFromLoginBody(early.data);
@@ -1318,7 +1390,10 @@ app.post("/api/auth/login", async (req, res) => {
               }
             }
           } catch (e) {
-            console.log("⚠️ GET /users/:id après login Dolibarr:", e?.message || e);
+            console.log(
+              "⚠️ GET /users/:id après login Dolibarr:",
+              e?.message || e,
+            );
           }
         }
         if (!user) {
@@ -1336,7 +1411,10 @@ app.post("/api/auth/login", async (req, res) => {
             user = built.user;
             dolibarrLoginPayload = { ...early.data, ...synthetic };
             users[user.id] = user;
-            console.log("✅ Dolibarr: /login (profil détaillé GET /users/:id indisponible)", user.email);
+            console.log(
+              "✅ Dolibarr: /login (profil détaillé GET /users/:id indisponible)",
+              user.email,
+            );
           }
         }
         if (user) {
@@ -1369,14 +1447,20 @@ app.post("/api/auth/login", async (req, res) => {
 
         // Dolibarr retourne un array de tous les users
         if (dolibarrUsers && Array.isArray(dolibarrUsers)) {
-          const want = String(email || "").trim().toLowerCase();
+          const want = String(email || "")
+            .trim()
+            .toLowerCase();
           // Même identifiant que sur l’écran Dolibarr : email OU login
           const dolibarrUser = dolibarrUsers.find(
             (u) =>
               u &&
               want &&
-              (String(u.email || "").trim().toLowerCase() === want ||
-                String(u.login || "").trim().toLowerCase() === want),
+              (String(u.email || "")
+                .trim()
+                .toLowerCase() === want ||
+                String(u.login || "")
+                  .trim()
+                  .toLowerCase() === want),
           );
 
           if (dolibarrUser) {
@@ -1405,11 +1489,17 @@ app.post("/api/auth/login", async (req, res) => {
 
     // 2. Si pas trouvé dans Dolibarr, chercher dans les users locaux (email ou username, insensible à la casse)
     if (!user) {
-      const emailLc = String(email || "").trim().toLowerCase();
+      const emailLc = String(email || "")
+        .trim()
+        .toLowerCase();
       user = Object.values(users).find(
         (u) =>
-          String(u.email || "").trim().toLowerCase() === emailLc ||
-          String(u.username || "").trim().toLowerCase() === emailLc,
+          String(u.email || "")
+            .trim()
+            .toLowerCase() === emailLc ||
+          String(u.username || "")
+            .trim()
+            .toLowerCase() === emailLc,
       );
       if (user) {
         console.log("✅ User found locally:", user.fullName);
@@ -1431,8 +1521,12 @@ app.post("/api/auth/login", async (req, res) => {
     const emailLc = emailTrim.toLowerCase();
     const seedUserForAuth = Object.values(users).find(
       (u) =>
-        String(u.email || "").trim().toLowerCase() === emailLc ||
-        String(u.username || "").trim().toLowerCase() === emailLc,
+        String(u.email || "")
+          .trim()
+          .toLowerCase() === emailLc ||
+        String(u.username || "")
+          .trim()
+          .toLowerCase() === emailLc,
     );
     const authEmailForPassword = seedUserForAuth
       ? String(seedUserForAuth.email || "").trim()
@@ -1481,7 +1575,10 @@ app.post("/api/auth/login", async (req, res) => {
     const mockPasswordOk = expected != null && expected === password;
     const dolibarrPasswordOk =
       dolibarrPasswordVerifiedEarly ||
-      (await verifyDolibarrWithLoginCandidates(dolLoginCandidates, password)) === true;
+      (await verifyDolibarrWithLoginCandidates(
+        dolLoginCandidates,
+        password,
+      )) === true;
 
     if (!mockPasswordOk && !dolibarrPasswordOk) {
       console.log("❌ Mot de passe refusé (mock et Dolibarr)");
@@ -1509,8 +1606,13 @@ app.post("/api/auth/login", async (req, res) => {
     // Enregistrer le mot de passe pour ce compte (mock en mémoire) : prochains logins même si /login Dolibarr est capricieux.
     if (mockPasswordOk || dolibarrPasswordOk) {
       if (emailTrim) validPasswords[emailTrim] = password;
-      if (userEmailStr && userEmailStr !== emailTrim) validPasswords[userEmailStr] = password;
-      if (dolEmailStr && dolEmailStr !== emailTrim && dolEmailStr !== userEmailStr) {
+      if (userEmailStr && userEmailStr !== emailTrim)
+        validPasswords[userEmailStr] = password;
+      if (
+        dolEmailStr &&
+        dolEmailStr !== emailTrim &&
+        dolEmailStr !== userEmailStr
+      ) {
         validPasswords[dolEmailStr] = password;
       }
     }
@@ -1701,16 +1803,15 @@ const buildSoldeResponse = (userId) => {
     pays: user.pays,
   }));
 
-  const byType = (key) =>
-    details.find((d) => d.type === key) || null;
+  const byType = (key) => details.find((d) => d.type === key) || null;
   const cp = byType("CONGES_PAYES");
-  const ligneSortieCourte = byType("SORTIE_COURTE"); /* registre uniquement pays FR dans typesCongePays */
+  const ligneSortieCourte =
+    byType(
+      "SORTIE_COURTE",
+    ); /* registre uniquement pays FR dans typesCongePays */
   const mal = byType("MALADIE");
 
-  const soldeCongesPayes = Math.max(
-    0,
-    cp ? Number(cp.solde_restant || 0) : 0,
-  );
+  const soldeCongesPayes = Math.max(0, cp ? Number(cp.solde_restant || 0) : 0);
   const soldeCourteDuree = ligneSortieCourte
     ? Math.max(0, Number(ligneSortieCourte.solde_restant || 0))
     : 0;
@@ -1778,7 +1879,8 @@ app.get("/api/conge/solde", (req, res) => {
   }
 
   const response = buildSoldeResponse(userId);
-  if (!response) return res.status(404).json({ error: "Utilisateur non trouve" });
+  if (!response)
+    return res.status(404).json({ error: "Utilisateur non trouve" });
 
   return res.json(response);
 });
@@ -1786,7 +1888,8 @@ app.get("/api/conge/solde", (req, res) => {
 app.get("/api/conge/solde/:userId", (req, res) => {
   const userId = parseInt(req.params.userId);
   const response = buildSoldeResponse(userId);
-  if (!response) return res.status(404).json({ error: "Utilisateur non trouve" });
+  if (!response)
+    return res.status(404).json({ error: "Utilisateur non trouve" });
   return res.json(response);
 });
 
@@ -1820,26 +1923,56 @@ app.get("/api/conge/meta/work-schedule", (req, res) => {
 // DEMANDES DE CONGÉS
 // ============================================
 
-app.post("/api/demande", (req, res) => {
+/** Endpoint Spring Boot compatible pour créer une demande de congé */
+app.post("/api/conge", (req, res) => {
+  // Extract userId from Bearer token
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.split(" ")[1];
+
+  let userId;
+  if (token) {
+    try {
+      const parts = token.split("_");
+      userId = parseInt(parts[1]);
+    } catch (e) {
+      userId = null;
+    }
+  }
+
   const {
-    userId,
-    typeConge,
+    titre,
     dateDebut,
     dateFin,
-    raison,
+    commentaire,
     heureDebut,
     heureFin,
-    heureArrivee,
+    startHalfDay,
+    endHalfDay,
+    demandeSortieCourte,
   } = req.body;
-  const uid = userId != null && userId !== "" ? Number(userId) : NaN;
-  if (!Number.isFinite(uid)) {
-    return res.status(400).json({
-      error: "Identifiant utilisateur invalide ou session incomplète. Reconnectez-vous.",
-    });
-  }
-  const user = users[uid];
 
+  if (!userId || !Number.isFinite(userId)) {
+    return res.status(401).json({ error: "Non authentifié" });
+  }
+
+  const user = users[userId];
   if (!user) return res.status(404).json({ error: "Utilisateur non trouvé" });
+
+  // Map titre to typeConge for mock format
+  const mapTitreToTypeCode = (titreStr) => {
+    const norm = String(titreStr ?? "").toLowerCase();
+    if (norm.includes("maladie")) return "CONGE_MALADIE";
+    if (norm.includes("sans solde")) return "CONGE_SANS_SOLDE";
+    if (norm.includes("retard")) return "RETARD_DEMAND";
+    if (norm.includes("sortie") || norm.includes("courte"))
+      return "SORTIE_COURTE";
+    if (norm.includes("parental")) return "PARENTAL";
+    if (norm.includes("enfant")) return "ENFANT_MALADE";
+    return "CONGES_PAYES";
+  };
+
+  const typeConge = mapTitreToTypeCode(titre);
+  const raison = commentaire || "";
 
   const validationDates = validerDates(dateDebut, dateFin);
   if (!validationDates.valid) {
@@ -1851,11 +1984,191 @@ app.post("/api/demande", (req, res) => {
 
   let nombreJours = calculerJoursOuvrables(dateDebut, dateFin, user.pays);
 
+  // Handle short leave (sortie courte durée / permission)
+  if (
+    (demandeSortieCourte || ledgerKey === "SORTIE_COURTE") &&
+    paysNorm !== "FR"
+  ) {
+    if (!heureDebut || !heureFin) {
+      return res.status(400).json({
+        error:
+          "Pour une permission courte durée, heure début et heure fin sont obligatoires.",
+      });
+    }
+    const allowed = isWithinSchedule(
+      user.pays,
+      dateDebut,
+      heureDebut,
+      heureFin,
+    );
+    if (!allowed) {
+      return res.status(400).json({
+        error: "Permission refusée: horaire hors plage autorisée.",
+      });
+    }
+    nombreJours = 0;
+  }
+
+  // Handle RTT in France (heure values are "FULL_DAY", "MORNING", or "AFTERNOON")
+  if (
+    (demandeSortieCourte || ledgerKey === "SORTIE_COURTE") &&
+    paysNorm === "FR" &&
+    (heureDebut === "FULL_DAY" ||
+      heureDebut === "MORNING" ||
+      heureDebut === "AFTERNOON")
+  ) {
+    // RTT mode - no hour validation needed
+    nombreJours = heureDebut === "FULL_DAY" ? 1 : 0.5;
+  }
+
+  // Verify sufficient balance
+  if (!absenceSansDecoteAuSolde(ledgerKey, paysNorm)) {
+    const soldeRestant = getSoldeRestantPourLedger(
+      userId,
+      ledgerKey,
+      user.pays,
+    );
+    if (nombreJours > soldeRestant) {
+      return res.status(400).json({
+        error: `Solde insuffisant : il reste ${soldeRestant} jour(s) pour ce type de demande.`,
+      });
+    }
+  }
+
+  const nextDemandeId =
+    demandes.reduce((m, d) => Math.max(m, Number(d.id) || 0), 0) + 1;
+  const newDemande = {
+    id: nextDemandeId,
+    userId: userId,
+    typeConge,
+    dateDebut,
+    dateFin,
+    heureDebut: heureDebut || null,
+    heureFin: heureFin || null,
+    nombreJours,
+    raison,
+    statut: "EN_ATTENTE",
+    dateCreation: new Date().toISOString().split("T")[0],
+    historique: [
+      {
+        date: new Date().toISOString().split("T")[0],
+        action: "CREATION",
+        user_id: userId,
+      },
+    ],
+    workflow: {
+      manager_id: user.manager_id,
+      manager_status: null,
+      rh_id: 3,
+      rh_status: null,
+      drh_id: 4,
+      drh_status: null,
+    },
+    dolibarr_sync: false,
+  };
+
+  demandes.push(newDemande);
+  saveMockPersistSync();
+
+  return res.status(201).json({
+    message: "Demande créée avec succès",
+    demande: newDemande,
+  });
+});
+
+app.post("/api/demande", (req, res) => {
+  const {
+    userId,
+    typeConge,
+    titre,
+    dateDebut,
+    dateFin,
+    raison,
+    commentaire,
+    heureDebut,
+    heureFin,
+    heureArrivee,
+    demandeSortieCourte,
+  } = req.body;
+
+  console.log("📨 POST /api/demande received:", req.body);
+
+  // Try to get userId from body first, then from Bearer token
+  let uid = userId != null && userId !== "" ? Number(userId) : NaN;
+
+  if (!Number.isFinite(uid)) {
+    // Try to extract from Bearer token
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.split(" ")[1];
+    if (token) {
+      try {
+        const parts = token.split("_");
+        uid = parseInt(parts[1]);
+        console.log("🔑 Extracted userId from token:", uid);
+      } catch (e) {
+        uid = NaN;
+      }
+    }
+  }
+
+  if (!Number.isFinite(uid)) {
+    console.log("❌ Invalid userId: not finite");
+    return res.status(400).json({
+      error:
+        "Identifiant utilisateur invalide ou session incomplète. Reconnectez-vous.",
+    });
+  }
+  const user = users[uid];
+
+  if (!user) {
+    console.log(
+      "❌ User not found for id:",
+      uid,
+      "Available users:",
+      Object.keys(users),
+    );
+    return res.status(404).json({ error: "Utilisateur non trouvé" });
+  }
+
+  // Accept both formats: typeConge OR titre (for compatibility with /api/conge format)
+  const mapTitreToTypeCode = (titreStr) => {
+    const norm = String(titreStr ?? "").toLowerCase();
+    if (norm.includes("maladie")) return "CONGE_MALADIE";
+    if (norm.includes("sans solde")) return "CONGE_SANS_SOLDE";
+    if (norm.includes("retard")) return "RETARD_DEMAND";
+    if (
+      norm.includes("sortie") ||
+      norm.includes("courte") ||
+      norm.includes("rtt")
+    )
+      return "SORTIE_COURTE";
+    if (norm.includes("parental")) return "PARENTAL";
+    if (norm.includes("enfant")) return "ENFANT_MALADE";
+    return "CONGES_PAYES";
+  };
+
+  const finalTypeConge = typeConge || mapTitreToTypeCode(titre);
+  const finalRaison = raison || commentaire || "";
+
+  console.log("✅ Final type:", finalTypeConge, "Raison:", finalRaison);
+
+  const validationDates = validerDates(dateDebut, dateFin);
+  if (!validationDates.valid) {
+    console.log("❌ Date validation failed:", validationDates.error);
+    return res.status(400).json({ error: validationDates.error });
+  }
+
+  const ledgerKey = normalizeCongeLedgerKey(finalTypeConge);
+  const paysNorm = normalizePaysForQuota(user.pays);
+
+  let nombreJours = calculerJoursOuvrables(dateDebut, dateFin, user.pays);
+
   /** J'arrive en retard : pas de blocage horaires type permission ; vérif uniquement soldes avant création */
   if (ledgerKey === "RETARD_DEMAND") {
     if (String(dateDebut).trim() !== String(dateFin).trim()) {
       return res.status(400).json({
-        error: "Un retard doit porter sur une seule date (date début = date fin).",
+        error:
+          "Un retard doit porter sur une seule date (date début = date fin).",
       });
     }
     const ha =
@@ -1873,7 +2186,11 @@ app.post("/api/demande", (req, res) => {
     nombreJours = 0;
     const cibleSoldeRetard = retardDebitLedgerKey(paysNorm);
     const debitRetardPrevu = retardDebitAmountJours(paysNorm);
-    const restSoldeRetard = getSoldeRestantPourLedger(uid, cibleSoldeRetard, user.pays);
+    const restSoldeRetard = getSoldeRestantPourLedger(
+      uid,
+      cibleSoldeRetard,
+      user.pays,
+    );
     if (restSoldeRetard + 1e-9 < debitRetardPrevu) {
       const label =
         paysNorm === "FR"
@@ -1890,7 +2207,8 @@ app.post("/api/demande", (req, res) => {
     const mins = minutesBetweenHeures(heureDebut, heureFin);
     if (mins !== 120) {
       return res.status(400).json({
-        error: "Durée invalide : exactement 2 heures sont attendues pour une autorisation courte.",
+        error:
+          "Durée invalide : exactement 2 heures sont attendues pour une autorisation courte.",
       });
     }
     const { utilisees, cap } = countMockNonFrShortHourlyInMonth(uid, dateDebut);
@@ -1908,7 +2226,11 @@ app.post("/api/demande", (req, res) => {
     } else if (ledgerKey === "RETARD_DEMAND") {
       /* Débit retard à l’approbation RH, pas à la création */
     } else {
-      const soldeRestant = getSoldeRestantPourLedger(userId, ledgerKey, user.pays);
+      const soldeRestant = getSoldeRestantPourLedger(
+        userId,
+        ledgerKey,
+        user.pays,
+      );
       if (nombreJours > soldeRestant) {
         return res.status(400).json({
           error: `Solde insuffisant : il reste ${soldeRestant} jour(s) pour ce type de demande.`,
@@ -1923,16 +2245,31 @@ app.post("/api/demande", (req, res) => {
     ledgerKey === "SORTIE_COURTE" ||
     String(typeConge).toUpperCase() === "RTT"
   ) {
-    if (!heureDebut || !heureFin) {
-      return res.status(400).json({
-        error: "Pour une permission courte durée, heure début et heure fin sont obligatoires.",
-      });
-    }
-    const allowed = isWithinSchedule(user.pays, dateDebut, heureDebut, heureFin);
-    if (!allowed) {
-      return res.status(400).json({
-        error: "Permission refusée: horaire hors plage autorisée.",
-      });
+    // Skip validation for RTT in France (heureDebut contains "FULL_DAY", "MORNING", "AFTERNOON")
+    const isRTTFrance =
+      paysNorm === "FR" &&
+      (heureDebut === "FULL_DAY" ||
+        heureDebut === "MORNING" ||
+        heureDebut === "AFTERNOON");
+
+    if (!isRTTFrance) {
+      if (!heureDebut || !heureFin) {
+        return res.status(400).json({
+          error:
+            "Pour une permission courte durée, heure début et heure fin sont obligatoires.",
+        });
+      }
+      const allowed = isWithinSchedule(
+        user.pays,
+        dateDebut,
+        heureDebut,
+        heureFin,
+      );
+      if (!allowed) {
+        return res.status(400).json({
+          error: "Permission refusée: horaire hors plage autorisée.",
+        });
+      }
     }
   }
 
@@ -1941,8 +2278,12 @@ app.post("/api/demande", (req, res) => {
 
   const hh =
     ledgerKey === "RETARD_DEMAND"
-      ? String(heureArrivee || "").trim().slice(0, 5) ||
-        String(heureDebut || "").trim().slice(0, 5) ||
+      ? String(heureArrivee || "")
+          .trim()
+          .slice(0, 5) ||
+        String(heureDebut || "")
+          .trim()
+          .slice(0, 5) ||
         null
       : heureDebut || null;
 
@@ -1951,17 +2292,14 @@ app.post("/api/demande", (req, res) => {
   const newDemande = {
     id: nextDemandeId,
     userId: uid,
-    typeConge,
+    typeConge: finalTypeConge,
     dateDebut,
     dateFin,
     heureDebut: hh,
-    heureFin:
-      ledgerKey === "RETARD_DEMAND"
-        ? null
-        : heureFin || null,
+    heureFin: ledgerKey === "RETARD_DEMAND" ? null : heureFin || null,
     dureePermissionMinutes,
     nombreJours,
-    raison,
+    raison: finalRaison,
     statut: "EN_ATTENTE",
     dateCreation: new Date().toISOString().split("T")[0],
     historique: [
@@ -2091,7 +2429,8 @@ function handleRhApprove(req, res) {
   // Mode mock: on autorise RH/DRH/ADMIN, et on garde un fallback permissif
   // si la session est authentifiée mais le mapping de rôles a été altéré.
   const hasAuthorizedRole =
-    user && (user.role === "RH" || user.role === "DRH" || user.role === "ADMIN");
+    user &&
+    (user.role === "RH" || user.role === "DRH" || user.role === "ADMIN");
   const hasAuthenticatedSession = Boolean(req.headers.authorization);
   if (!hasAuthorizedRole && !hasAuthenticatedSession) {
     return res.status(403).json({ error: "Pas de permission RH" });
@@ -2241,12 +2580,31 @@ app.post("/api/demande/:id/reject", handleRhReject);
 // TABLEAU DE BORD RH
 // ============================================
 
+/** Endpoint pour récupérer la liste des vrais admins DRH seulement */
+app.get("/api/hr/admins", (req, res) => {
+  // Retourne seulement les admins DRH avec un fullName valide
+  // Exclut les doublons Dolibarr sans nom
+  const admins = Object.values(users)
+    .filter((u) => u.role === "DRH" && u.fullName && u.fullName.trim())
+    .map((u) => ({
+      id: u.id,
+      name: u.fullName,
+      email: u.email,
+      role: u.role,
+      departement: u.departement,
+    }));
+
+  return res.json(admins);
+});
+
 app.get("/api/rh/dashboard", (req, res) => {
   const totalDemandes = demandes.length;
   const st = (d) => String(d.statut || "").toUpperCase();
   const enAttente = demandes.filter((d) => {
     const s = st(d);
-    return s.includes("EN_ATTENTE") || s.includes("MANAGER") || s.includes("PENDING");
+    return (
+      s.includes("EN_ATTENTE") || s.includes("MANAGER") || s.includes("PENDING")
+    );
   }).length;
   const approuvees = demandes.filter((d) => {
     const s = st(d);
@@ -2312,7 +2670,8 @@ app.get("/api/rh/demandes-en-attente", (req, res) => {
 });
 
 app.get("/api/rh/requests", (req, res) => {
-  const { status, employee, country, department, startDate, endDate } = req.query;
+  const { status, employee, country, department, startDate, endDate } =
+    req.query;
 
   let rows = demandes.map(toRhRequestDto);
 
@@ -2423,6 +2782,151 @@ app.get("/api/hr/requests/pending", (req, res) => {
   return res.json(rows);
 });
 
+app.get("/api/hr/balances", (req, res) => {
+  const { q = "", page = "0", size = "10" } = req.query;
+  const pageNum = Math.max(0, Number(page));
+  const sizeNum = Math.max(1, Number(size));
+  const currentYear = new Date().getFullYear();
+
+  // Construire la liste de tous les soldes par utilisateur/année
+  const allBalances = [];
+  for (const [userId, user] of Object.entries(users)) {
+    const userIdNum = Number(userId);
+    // Créer une entrée pour l'année courante
+    const soldes = kongesSoldes[userIdNum] || {};
+    const userPays = user.pays || "TN";
+    const types = typesCongePays[userPays] || {};
+
+    // Construire les lignes de soldes pour cet utilisateur
+    const balances = [];
+    for (const [typeKey, typeCfg] of Object.entries(types)) {
+      const utilized = soldes[typeKey]?.utilise || 0;
+      const initial = Number(typeCfg.jours || 0);
+      const remaining = Math.max(0, initial - utilized);
+
+      balances.push({
+        typeConge: typeKey,
+        label: typeCfg.nom,
+        initial,
+        utilized,
+        remaining,
+      });
+    }
+
+    allBalances.push({
+      user: {
+        id: userIdNum,
+        prenom: user.fullName?.split(" ")[0] || "",
+        nom: user.fullName?.split(" ").slice(1).join(" ") || "",
+        email: user.email,
+        country: user.pays,
+        departement: user.departement,
+      },
+      year: currentYear,
+      balances,
+    });
+  }
+
+  // Filtrer par recherche
+  let filtered = allBalances;
+  if (q && q.trim()) {
+    const searchLower = q.trim().toLowerCase();
+    filtered = allBalances.filter((item) => {
+      const user = item.user || {};
+      const fullName = `${user.prenom || ""} ${user.nom || ""}`.toLowerCase();
+      const email = String(user.email || "").toLowerCase();
+      return (
+        fullName.includes(searchLower) ||
+        email.includes(searchLower) ||
+        String(user.id).includes(searchLower)
+      );
+    });
+  }
+
+  // Pagination
+  const total = filtered.length;
+  const totalPages = Math.ceil(total / sizeNum);
+  const startIdx = pageNum * sizeNum;
+  const endIdx = startIdx + sizeNum;
+  const items = filtered.slice(startIdx, endIdx);
+
+  return res.json({
+    items,
+    page: pageNum,
+    size: sizeNum,
+    total,
+    totalPages,
+  });
+});
+
+app.put("/api/hr/balances", (req, res) => {
+  const payload = Array.isArray(req.body) ? req.body : [req.body];
+  const updates = [];
+
+  for (const item of payload) {
+    const userId = Number(item?.userId);
+    const year = Number(item?.year);
+
+    if (!Number.isFinite(userId) || !Number.isFinite(year)) {
+      continue;
+    }
+
+    const user = users[userId];
+    if (!user) continue;
+
+    // Initialiser les soldes de cet utilisateur s'ils n'existent pas
+    if (!kongesSoldes[userId]) {
+      kongesSoldes[userId] = {};
+    }
+
+    const userSoldes = kongesSoldes[userId];
+    const itemUpdates = Array.isArray(item?.updates) ? item.updates : [];
+
+    for (const update of itemUpdates) {
+      const typeConge = update?.typeConge;
+      const remaining = Number(update?.remaining);
+
+      if (!typeConge || !Number.isFinite(remaining) || remaining < 0) {
+        continue;
+      }
+
+      // Récupérer la config pour ce type de congé
+      const userPays = user.pays || "TN";
+      const types = typesCongePays[userPays] || {};
+      const typeCfg = types[typeConge];
+
+      if (typeCfg) {
+        const initial = Number(typeCfg.jours || 0);
+        const utilized = Math.max(0, initial - remaining);
+
+        if (!userSoldes[typeConge]) {
+          userSoldes[typeConge] = {};
+        }
+
+        userSoldes[typeConge].utilise = utilized;
+        userSoldes[typeConge].restant = remaining;
+
+        updates.push({
+          userId,
+          year,
+          typeConge,
+          initial,
+          utilized,
+          remaining,
+        });
+      }
+    }
+  }
+
+  scheduleMockPersist();
+
+  return res.json({
+    success: true,
+    updated: updates.length,
+    updates,
+  });
+});
+
 app.post("/api/hr/requests/:id/decision", (req, res) => {
   const action = String(req.body?.action ?? "").toUpperCase();
   const comment = req.body?.comment ?? "";
@@ -2472,7 +2976,8 @@ app.get("/api/calendar/events", (req, res) => {
         String(department).toLowerCase();
     const byCountry =
       !country ||
-      String(employe.pays || "").toUpperCase() === String(country).toUpperCase();
+      String(employe.pays || "").toUpperCase() ===
+        String(country).toUpperCase();
     const overlapsPeriod =
       (!endDate || String(d.dateDebut) <= String(endDate)) &&
       (!startDate || String(d.dateFin) >= String(startDate));
@@ -2506,7 +3011,8 @@ app.get("/api/calendar/events", (req, res) => {
   const start = String(startDate || "");
   const end = String(endDate || "");
   Object.keys(publicHolidaysStore).forEach((countryCode) => {
-    if (country && countryCode.toUpperCase() !== String(country).toUpperCase()) return;
+    if (country && countryCode.toUpperCase() !== String(country).toUpperCase())
+      return;
     publicHolidaysStore[countryCode].forEach((h) => {
       if (!h.active) return;
       if (start && h.dateJour < start) return;
@@ -2542,26 +3048,31 @@ app.post("/api/hr-config/workflow-rules", (req, res) => {
 });
 
 app.get("/api/hr-config/country-rules", (req, res) => {
-  const rules = Object.entries(typesCongePays).flatMap(([countryCode, rulesByType]) =>
-    Object.entries(rulesByType).map(([leaveCode, cfg]) => ({
-      countryCode,
-      leaveCode,
-      label: cfg.nom,
-      annualQuota: cfg.jours,
-    })),
+  const rules = Object.entries(typesCongePays).flatMap(
+    ([countryCode, rulesByType]) =>
+      Object.entries(rulesByType).map(([leaveCode, cfg]) => ({
+        countryCode,
+        leaveCode,
+        label: cfg.nom,
+        annualQuota: cfg.jours,
+      })),
   );
   return res.json(rules);
 });
 
 app.get("/api/hr-config/leave-types", (req, res) => {
-  const country = req.query.country ? String(req.query.country).toUpperCase() : "TN";
-  const types = Object.entries(typesCongePays[country] || {}).map(([code, cfg], idx) => ({
-    id: idx + 1,
-    code,
-    libelle: cfg.nom,
-    annualQuota: cfg.jours,
-    active: true,
-  }));
+  const country = req.query.country
+    ? String(req.query.country).toUpperCase()
+    : "TN";
+  const types = Object.entries(typesCongePays[country] || {}).map(
+    ([code, cfg], idx) => ({
+      id: idx + 1,
+      code,
+      libelle: cfg.nom,
+      annualQuota: cfg.jours,
+      active: true,
+    }),
+  );
   return res.json(types);
 });
 
@@ -2586,10 +3097,18 @@ app.put("/api/hr-config/work-schedules", (req, res) => {
   const type = String(payload.scheduleType || "NORMAL").toUpperCase();
   const schedule = ensureWorkSchedule(country);
 
-  schedule.settings.activeType = String(payload.activeType || schedule.settings.activeType || "NORMAL").toUpperCase();
-  schedule.settings.normalEnabled = Boolean(payload.normalEnabled ?? schedule.settings.normalEnabled);
-  schedule.settings.summerEnabled = Boolean(payload.summerEnabled ?? schedule.settings.summerEnabled);
-  schedule.settings.ramadanEnabled = Boolean(payload.ramadanEnabled ?? schedule.settings.ramadanEnabled);
+  schedule.settings.activeType = String(
+    payload.activeType || schedule.settings.activeType || "NORMAL",
+  ).toUpperCase();
+  schedule.settings.normalEnabled = Boolean(
+    payload.normalEnabled ?? schedule.settings.normalEnabled,
+  );
+  schedule.settings.summerEnabled = Boolean(
+    payload.summerEnabled ?? schedule.settings.summerEnabled,
+  );
+  schedule.settings.ramadanEnabled = Boolean(
+    payload.ramadanEnabled ?? schedule.settings.ramadanEnabled,
+  );
 
   if (Array.isArray(payload.rows)) {
     schedule.types[type] = payload.rows.map((row) => ({
@@ -2619,6 +3138,45 @@ app.get("/api/hr-config/integration-settings", (req, res) => {
     endpoint: dolibarrConfig.url,
     apiOnly: true,
   });
+});
+
+/** Endpoint pour les employés : récupère les congés exceptionnels disponibles selon leur pays */
+app.get("/api/exceptional-leaves/available", (req, res) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ error: "Non authentifié" });
+  }
+
+  let userId;
+  try {
+    const parts = token.split("_");
+    userId = parseInt(parts[1]);
+  } catch (e) {
+    userId = null;
+  }
+
+  if (!Number.isFinite(userId)) {
+    return res.status(401).json({ error: "Token invalide" });
+  }
+
+  const user = users[userId];
+  if (!user) {
+    return res.status(404).json({ error: "Utilisateur non trouvé" });
+  }
+
+  const country = normalizePaysForQuota(user.pays || "TN");
+  const rows = exceptionalLeavesByCountry[country] || [];
+
+  // Retourner uniquement les congés exceptionnels activés
+  return res.json(
+    rows
+      .filter((row) => row.enabled)
+      .map((row) => ({
+        id: row.id,
+        label: row.label,
+        daysPerYear: row.daysPerYear,
+      })),
+  );
 });
 
 app.get("/api/hr-config/exceptional-leaves", (req, res) => {
@@ -2684,10 +3242,18 @@ app.put("/api/hr-config/exceptional-leaves/:id", (req, res) => {
   const existing = exceptionalLeavesByCountry[currentCountry][currentIndex];
   const updated = {
     id: existing.id,
-    label: payload.label !== undefined ? String(payload.label).trim() : existing.label,
+    label:
+      payload.label !== undefined
+        ? String(payload.label).trim()
+        : existing.label,
     daysPerYear:
-      payload.daysPerYear !== undefined ? Number(payload.daysPerYear) : existing.daysPerYear,
-    enabled: payload.enabled !== undefined ? Boolean(payload.enabled) : existing.enabled,
+      payload.daysPerYear !== undefined
+        ? Number(payload.daysPerYear)
+        : existing.daysPerYear,
+    enabled:
+      payload.enabled !== undefined
+        ? Boolean(payload.enabled)
+        : existing.enabled,
   };
 
   exceptionalLeavesByCountry[currentCountry].splice(currentIndex, 1);
@@ -2715,8 +3281,12 @@ app.get("/api/hr-config/public-holidays", (req, res) => {
 });
 
 app.post("/api/hr-config/public-holidays/import", async (req, res) => {
-  const country = String(req.query.country || req.body?.country || "TN").toUpperCase();
-  const year = Number(req.query.year || req.body?.year || new Date().getFullYear());
+  const country = String(
+    req.query.country || req.body?.country || "TN",
+  ).toUpperCase();
+  const year = Number(
+    req.query.year || req.body?.year || new Date().getFullYear(),
+  );
   try {
     const result = await importOfficialPublicHolidaysForCountry(country, year);
     scheduleMockPersist();
@@ -2728,13 +3298,17 @@ app.post("/api/hr-config/public-holidays/import", async (req, res) => {
       imported: 0,
       country,
       year,
-      warning: e.message || "Source internet indisponible, conservation des données existantes.",
+      warning:
+        e.message ||
+        "Source internet indisponible, conservation des données existantes.",
     });
   }
 });
 
 app.post("/api/hr-config/public-holidays/import-all", async (req, res) => {
-  const year = Number(req.query.year || req.body?.year || new Date().getFullYear());
+  const year = Number(
+    req.query.year || req.body?.year || new Date().getFullYear(),
+  );
   const raw = req.query.countries ?? req.body?.countries;
   let countries = [...HR_PUBLIC_HOLIDAY_COUNTRIES];
   if (raw != null && String(raw).trim() !== "") {
@@ -2750,7 +3324,10 @@ app.post("/api/hr-config/public-holidays/import-all", async (req, res) => {
     results.push(result);
   }
 
-  const totalImported = results.reduce((sum, r) => sum + (Number(r.imported) || 0), 0);
+  const totalImported = results.reduce(
+    (sum, r) => sum + (Number(r.imported) || 0),
+    0,
+  );
   scheduleMockPersist();
   return res.json({
     success: true,
@@ -2775,7 +3352,9 @@ app.post("/api/hr-config/public-holidays", (req, res) => {
   }
 
   const existing = publicHolidaysStore[country].find(
-    (h) => h.dateJour === dateJour && h.libelle.toLowerCase() === libelle.toLowerCase(),
+    (h) =>
+      h.dateJour === dateJour &&
+      h.libelle.toLowerCase() === libelle.toLowerCase(),
   );
   if (existing) {
     existing.active = true;
@@ -2977,7 +3556,9 @@ app.listen(PORT, () => {
   if (notificationService.isSmtpConfigured()) {
     console.log(`  📧 SMTP: configuré (envoi réel) — .env: ${envPath}`);
   } else {
-    console.log(`  📧 SMTP: non configuré → emails RH uniquement journal console`);
+    console.log(
+      `  📧 SMTP: non configuré → emails RH uniquement journal console`,
+    );
     console.log(`      → place MAIL_USERNAME + MAIL_PASSWORD dans: ${envPath}`);
   }
   if (!mockPersistDisabled()) {
@@ -2995,7 +3576,9 @@ app.listen(PORT, () => {
       scheduleMockPersist();
     })
     .catch((err) => {
-      console.warn(`  ⚠ Synchronisation jours fériés (démarrage): ${err?.message || err}`);
+      console.warn(
+        `  ⚠ Synchronisation jours fériés (démarrage): ${err?.message || err}`,
+      );
     });
   console.log(`\n📚 Fonctionnalités implémentées:`);
   console.log(`  ✓ Gestion des demandes de congés`);

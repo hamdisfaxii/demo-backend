@@ -11,8 +11,10 @@ import com.example.conges.entity.Role;
 import com.example.conges.entity.StatutConge;
 import com.example.conges.entity.TypeConge;
 import com.example.conges.entity.UserEntity;
+import com.example.conges.entity.ExceptionalLeaveConfig;
 import com.example.conges.repository.DemandeCongeRepository;
 import com.example.conges.repository.EmployeeLeaveAllocationRepository;
+import com.example.conges.repository.ExceptionalLeaveConfigRepository;
 import com.example.conges.repository.JoursPrisParTypeProjection;
 import com.example.conges.repository.UserRepository;
 import javax.persistence.EntityNotFoundException;
@@ -67,6 +69,7 @@ public class CongeService {
     private final FranceRttLedgerService franceRttLedgerService;
     private final NotificationService notificationService;
     private final HrLeaveBalanceService hrLeaveBalanceService;
+    private final ExceptionalLeaveConfigRepository exceptionalLeaveConfigRepository;
 
     @Transactional
     public DemandeCongeResponse creerDemande(Long userId, DemandeCongeRequest request) {
@@ -102,6 +105,9 @@ public class CongeService {
 
         DemandeConge demande;
 
+        if (type == TypeConge.EXCEPTIONNEL) {
+            demande = buildExceptionalLeaveDemande(user, request, paysNorm);
+        } else
         if (type == TypeConge.COURTE_DUREE) {
             LocalTime hd = request.getHeureDebut();
             LocalTime hf = request.getHeureFin();
@@ -240,6 +246,54 @@ public class CongeService {
         notifySuperAdminsOnCreate(user, saved, approvedBy);
 
         return toResponse(saved);
+    }
+
+    private DemandeConge buildExceptionalLeaveDemande(UserEntity user, DemandeCongeRequest request, String paysNorm) {
+        Long cfgId = request.getExceptionalLeaveConfigId();
+        if (cfgId == null) {
+            throw new IllegalArgumentException("Veuillez sélectionner un congé exceptionnel.");
+        }
+        ExceptionalLeaveConfig cfg = exceptionalLeaveConfigRepository.findById(cfgId)
+                .orElseThrow(() -> new IllegalArgumentException("Congé exceptionnel introuvable."));
+        String cfgCountry = countryPolicyService.normalizeBusinessCountry(cfg.getCountryCode());
+        if (!cfgCountry.equalsIgnoreCase(paysNorm)) {
+            throw new IllegalArgumentException("Congé exceptionnel invalide pour votre pays.");
+        }
+        if (!Boolean.TRUE.equals(cfg.getEnabled())) {
+            throw new IllegalArgumentException("Ce congé exceptionnel est désactivé.");
+        }
+        double joursExact = DemandeConge.calculerJoursOuvrablesExact(
+                request.getDateDebut(),
+                request.getDateFin(),
+                request.getStartHalfDay(),
+                request.getEndHalfDay());
+        if (joursExact <= 0d) {
+            throw new IllegalArgumentException("Aucun jour ouvrable dans la période choisie");
+        }
+        // Quota annuel par type exceptionnel (EN_ATTENTE + ACCEPTE).
+        int year = request.getDateDebut().getYear();
+        double usedOrPending = demandeCongeRepository.sumExceptionalDaysForUserAndConfig(
+                user.getId(), cfgId, year, EnumSet.of(StatutConge.EN_ATTENTE, StatutConge.ACCEPTE));
+        double quota = cfg.getDaysPerYear() == null ? 0d : Math.max(0d, cfg.getDaysPerYear());
+        double remaining = Math.max(0d, quota - usedOrPending);
+        if (joursExact - remaining > 1e-9) {
+            throw new IllegalStateException(String.format(
+                    "Solde congé exceptionnel insuffisant (%s) : %.2f j. demandé(s), %.2f disponible(s) sur %.2f.",
+                    cfg.getLabel(), joursExact, remaining, quota));
+        }
+        return DemandeConge.builder()
+                .user(user)
+                .typeConge(TypeConge.EXCEPTIONNEL)
+                .exceptionalLeaveConfigId(cfgId)
+                .dateDebut(request.getDateDebut())
+                .dateFin(request.getDateFin())
+                .nombreJours((int) Math.round(joursExact))
+                .nombreJoursExact(joursExact)
+                .motif(request.getMotif())
+                .statut(StatutConge.EN_ATTENTE)
+                .startHalfDay(request.getStartHalfDay())
+                .endHalfDay(request.getEndHalfDay())
+                .build();
     }
 
     private UserEntity resolveApprovedByAdmin(Long approvedByAdminId) {
@@ -653,6 +707,9 @@ public class CongeService {
         if (type == TypeConge.SANS_SOLDE) {
             return;
         }
+        if (type == TypeConge.EXCEPTIONNEL) {
+            return;
+        }
 
         if (type == TypeConge.COURTE_DUREE
                 && "FR".equals(countryPolicyService.normalizeBusinessCountry(user.getPays()))
@@ -966,6 +1023,7 @@ public class CongeService {
                 .commentaireRh(d.getCommentaireRh())
                 .dateSoumission(d.getDateSoumission())
                 .dateTraitement(d.getDateTraitement())
+                .exceptionalLeaveConfigId(d.getExceptionalLeaveConfigId())
                 .employe(DemandeCongeResponse.EmployeInfo.builder()
                         .nom(u.getNom())
                         .prenom(u.getPrenom())

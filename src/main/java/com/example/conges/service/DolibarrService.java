@@ -186,6 +186,7 @@ public class DolibarrService {
                     .orElse(null);
 
             String resolvedEmail = resolveEmployeeEmail(doliEmployee.getEmail(), doliEmployee.getId());
+            Role resolvedRole = resolveRole(existingUser, doliEmployee, resolvedEmail);
 
             if (existingUser != null) {
                 // Mise à jour de l'employé existant
@@ -198,6 +199,9 @@ public class DolibarrService {
                 existingUser.setPays(
                         normalizeToSupportedHrPays(
                                 resolveCountryCode(doliEmployee.getId(), doliEmployee)));
+                // Important: si l'utilisateur est Super Admin dans Dolibarr, on le reflète localement
+                // afin que le champ « Approuvé par » liste tous les comptes admin Dolibarr.
+                existingUser.setRole(resolvedRole);
                 userRepository.save(existingUser);
                 dolibarrSyncLogService.logSuccess(
                         "USER",
@@ -218,7 +222,7 @@ public class DolibarrService {
                         .prenom(doliEmployee.getFirstName())
                         .pays(normalizeToSupportedHrPays(
                                 resolveCountryCode(doliEmployee.getId(), doliEmployee)))
-                        .role(Role.EMPLOYE)  // Par défaut, tout nouvel employé est EMPLOYE
+                        .role(resolvedRole)
                         .build();
 
                 userRepository.save(newUser);
@@ -238,6 +242,29 @@ public class DolibarrService {
 
         log.info("Synchronisation Dolibarr complétée: {} employés synchronisés", syncCount);
         return syncCount;
+    }
+
+    /**
+     * Détermine le rôle local à partir d'un user Dolibarr.
+     * <p>Objectif: exposer correctement les comptes "Super Admin" Dolibarr via /api/hr/admins pour le champ
+     * « Approuvé par ».
+     */
+    private Role resolveRole(UserEntity existingUser, DolibarrEmployeeDto dolibarrUser, String email) {
+        if (existingUser != null
+                && existingUser.getRole() != null
+                && existingUser.getRole() != Role.EMPLOYE) {
+            // Si un rôle RH/ADMIN local a déjà été validé, on le conserve.
+            return existingUser.getRole();
+        }
+        if (dolibarrUser != null && dolibarrUser.isAdminLike()) {
+            return Role.ADMIN;
+        }
+        String login = dolibarrUser == null ? "" : String.valueOf(dolibarrUser.getLogin()).toLowerCase(Locale.ROOT);
+        String normalizedEmail = email == null ? "" : email.toLowerCase(Locale.ROOT);
+        if (login.contains("admin") || normalizedEmail.contains("admin")) {
+            return Role.ADMIN;
+        }
+        return Role.EMPLOYE;
     }
 
     private String resolveEmployeeEmail(String rawEmail, Long dolibarrId) {
@@ -288,6 +315,7 @@ public class DolibarrService {
             existingUser.setPrenom(foundEmployee.getFirstName());
             existingUser.setPays(normalizeToSupportedHrPays(
                     resolveCountryCode(foundEmployee.getId(), foundEmployee)));
+            existingUser.setRole(resolveRole(existingUser, foundEmployee, email));
             userRepository.save(existingUser);
             log.info("Employé {} lié à Dolibarr (ID: {})", email, foundEmployee.getId());
             return existingUser;
@@ -299,7 +327,7 @@ public class DolibarrService {
                     .prenom(foundEmployee.getFirstName())
                     .pays(normalizeToSupportedHrPays(
                             resolveCountryCode(foundEmployee.getId(), foundEmployee)))
-                    .role(Role.EMPLOYE)
+                    .role(resolveRole(null, foundEmployee, email))
                     .build();
             userRepository.save(newUser);
             log.info("Nouvel employé créé et synchronisé avec Dolibarr: {}", email);
@@ -405,16 +433,30 @@ public class DolibarrService {
      * Récupère les allocations depuis l’API REST Dolibarr (toutes, ou filtre optionnel fk_user selon versions).
      */
     public List<DolibarrLeaveAllocationDto> getLeaveAllocationsFromDolibarr() {
+        // L'API REST peut être partielle selon modules/versions (souvent uniquement CP). On fusionne avec la DB.
         List<DolibarrLeaveAllocationDto> fromApi = fetchLeaveAllocationsFromDolibarrApi(null);
-        if (!fromApi.isEmpty()) return fromApi;
-        // Fallback DB (Dolibarr <= 23.x peut ne pas exposer allocations via REST)
+        List<DolibarrLeaveAllocationDto> fromDb;
         try {
-            List<DolibarrLeaveAllocationDto> fromDb = fetchLeaveAllocationsFromDolibarrDb();
-            return fromDb != null ? fromDb : List.of();
+            fromDb = fetchLeaveAllocationsFromDolibarrDb();
         } catch (RuntimeException ex) {
             log.warn("Fallback DB allocations Dolibarr indisponible: {}", ex.getMessage());
-            return fromApi;
+            fromDb = List.of();
         }
+
+        if ((fromApi == null || fromApi.isEmpty()) && (fromDb == null || fromDb.isEmpty())) {
+            return List.of();
+        }
+
+        int year = java.time.Year.now().getValue();
+        Map<String, DolibarrLeaveAllocationDto> merged = new LinkedHashMap<>();
+        for (DolibarrLeaveAllocationDto a : (fromApi == null ? List.<DolibarrLeaveAllocationDto>of() : fromApi)) {
+            merged.put(allocMergeKey(a, year), sanitizeAllocationDates(a, year));
+        }
+        // DB doit écraser l'API quand les deux existent (Dolibarr holiday_users = source compteur).
+        for (DolibarrLeaveAllocationDto a : (fromDb == null ? List.<DolibarrLeaveAllocationDto>of() : fromDb)) {
+            merged.put(allocMergeKey(a, year), sanitizeAllocationDates(a, year));
+        }
+        return new ArrayList<>(merged.values());
     }
 
     /**
@@ -801,7 +843,7 @@ public class DolibarrService {
         String tbl = qualifiedDolibarrTableName("holiday_users");
         try {
             String sql = "SELECT fk_user, fk_type, nb_holiday FROM `" + tbl + "` WHERE fk_user = ?";
-            return jdbcTemplate.query(
+            return dolibarrJdbcTemplate.query(
                     sql, ps -> ps.setLong(1, fkUserDolibarr), (rs, rowNum) -> mapJdbcHolidayUsersRow(rs, defaultYear));
         } catch (Exception ex) {
             log.debug("Lecture table Dolibarr {} ignorée : {}", tbl, ex.getMessage());
@@ -859,7 +901,7 @@ public class DolibarrService {
         try {
             String sql =
                     "SELECT rowid, code, label, delay, active FROM `" + tbl + "` WHERE rowid = ? LIMIT 1";
-            List<HolidayJdbcTypeRow> rows = jdbcTemplate.query(
+            List<HolidayJdbcTypeRow> rows = dolibarrJdbcTemplate.query(
                     sql,
                     ps -> ps.setLong(1, rowid),
                     (rs, rn) ->
@@ -1235,6 +1277,7 @@ public class DolibarrService {
                             || code.contains("UNPAID")
                             || label.contains("sans solde")
                             || label.contains("unpaid");
+            case EXCEPTIONNEL -> false;
         };
     }
 

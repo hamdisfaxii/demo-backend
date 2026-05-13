@@ -75,7 +75,10 @@ public class WorkflowService {
                 .orElseThrow(() -> new IllegalStateException("Étape courante workflow introuvable"));
 
         if (actor.getRole() != currentStep.getApproverRole()) {
-            throw new AccessDeniedException("Votre rôle ne peut pas traiter l'étape courante");
+            // ADMIN peut traiter toutes les étapes (délégation / secours).
+            if (actor.getRole() != Role.ADMIN) {
+                throw new AccessDeniedException("Votre rôle ne peut pas traiter l'étape courante");
+            }
         }
 
         demandeApprovalRepository.save(DemandeApproval.builder()

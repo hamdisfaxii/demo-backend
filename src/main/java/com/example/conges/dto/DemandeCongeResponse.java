@@ -28,6 +28,7 @@ public class DemandeCongeResponse {
     private String commentaireRh;
     private LocalDateTime dateSoumission;
     private LocalDateTime dateTraitement;
+    private Long exceptionalLeaveConfigId;
     private EmployeInfo employe;
     private ApproverInfo approuvePar;
 
